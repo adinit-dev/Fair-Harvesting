@@ -23,7 +23,7 @@ import {
   X,
 } from 'lucide-react'
 import './App.css'
-import { readAssistantResponse } from './lib/assistantApi.js'
+import { apiHeaders, apiUrl, readAssistantResponse } from './lib/assistantApi.js'
 import FasalSaathi from './components/FasalSaathi.jsx'
 import LandingIntro from './components/LandingIntro.jsx'
 import { useAuth, ProtectedRoute } from './lib/auth.jsx'
@@ -48,6 +48,7 @@ import {
   fetchListingOffers,
   createOffer,
   updateOfferStatus,
+  withdrawRequirement,
 } from './lib/data.js'
 import { isDemoMode, supabase } from './lib/supabase.js'
 import { validateCommonInput } from './lib/assistantCalculations.js'
@@ -339,7 +340,8 @@ function Marketplace() {
   useEffect(() => {
     if (isDemoMode) return undefined
     let active = true
-    Promise.all([fetchActiveListings(), fetchActiveRequirements()]).then(([listingResult, demandResult]) => {
+    const requirementRequest = user ? fetchActiveRequirements() : Promise.resolve({ data: [], error: null })
+    Promise.all([fetchActiveListings(), requirementRequest]).then(([listingResult, demandResult]) => {
       if (!active) return
       if (listingResult.error || demandResult.error) setLoadError(listingResult.error?.message || demandResult.error?.message || 'Unable to load marketplace.')
       setItems((listingResult.data || []).map(entry => ({
@@ -357,7 +359,7 @@ function Marketplace() {
       setLoading(false)
     }).catch(error => { if (active) { setLoadError(error.message || 'Unable to load marketplace.'); setLoading(false) } })
     return () => { active = false }
-  }, [])
+  }, [user])
 
   async function submitDemandOffer(event) {
     event.preventDefault()
@@ -654,6 +656,7 @@ function ListingDetail() {
               )}
               {messages.map((message) => (
                 <div key={message.id} className={`message-bubble ${message.sender_id === user?.id ? 'outgoing' : 'incoming'}`}>
+                  <small>{message.sender_id === user?.id ? 'You' : 'Other participant'}{message.created_at ? ` · ${new Date(message.created_at).toLocaleString()}` : ''}</small>
                   <span>{message.body}</span>
                 </div>
               ))}
@@ -718,14 +721,14 @@ function ListingDetail() {
                     </div>
                     <div className="offer-actions">
                       <span className={`offer-status offer-status--${offer.status}`}>{offer.status}</span>
-                      {!isDemoMode && offer.status === 'pending' && isSeller && (
+                      {!isDemoMode && ['pending', 'countered'].includes(offer.status) && isSeller && (
                         <>
                           <button type="button" className="btn btn-small btn-primary" onClick={() => handleOfferAction(offer.id, 'accepted')}>Accept</button>
                           <button type="button" className="btn btn-small btn-outline" onClick={() => handleOfferAction(offer.id, 'countered')}>Counter</button>
                           <button type="button" className="btn btn-small btn-outline" onClick={() => handleOfferAction(offer.id, 'rejected')}>Reject</button>
                         </>
                       )}
-                      {!isDemoMode && offer.status === 'pending' && isBuyer && (
+                      {!isDemoMode && ['pending', 'countered'].includes(offer.status) && isBuyer && (
                         <button type="button" className="btn btn-small btn-outline" onClick={() => handleOfferAction(offer.id, 'withdrawn')}>Withdraw</button>
                       )}
                       {!isDemoMode && isSeller && offer.conversation_id && (
@@ -822,6 +825,7 @@ function Dashboard({ role }) {
         setRequirementsError(error.message)
         return { error }
       }
+
       setRequirements(data || [])
       return { error: null }
     } catch (error) {
@@ -831,6 +835,16 @@ function Dashboard({ role }) {
     } finally {
       setRequirementsLoading(false)
     }
+  }
+
+  async function handleWithdrawRequirement(id) {
+    if (!user || demo) return
+    const result = await withdrawRequirement(id, user.id)
+    if (result.error) {
+      setRequirementsError(result.error.message || 'Unable to withdraw this requirement.')
+      return
+    }
+    await refreshRequirements()
   }
 
   async function refreshListings() {
@@ -995,6 +1009,11 @@ function Dashboard({ role }) {
                           {req.quality_requirements && <span>{req.quality_requirements}</span>}
                         </div>
                         <span className="status-pill" style={{marginTop:'auto',alignSelf:'flex-start'}}>{req.status}</span>
+                        {req.status === 'active' && (
+                          <button type="button" className="btn btn-outline btn-small" onClick={() => handleWithdrawRequirement(req.id)}>
+                            Withdraw requirement
+                          </button>
+                        )}
                       </div>
                     </article>
                   ))}
@@ -1492,6 +1511,7 @@ function Assistant({ mode }) {
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const { session } = useAuth()
 
   function update(key, value) { setInput(previous => ({ ...previous, [key]: value })) }
   function validate() {
@@ -1506,11 +1526,12 @@ function Assistant({ mode }) {
     if (!reviewing) { setReviewing(true); return }
     setBusy(true)
     try {
-      const response = await fetch('/api/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, input }) })
+      const response = await fetch(apiUrl('/api/assistant'), { method: 'POST', headers: apiHeaders(session, { 'Content-Type': 'application/json' }), body: JSON.stringify({ mode, input }) })
       const payload = await readAssistantResponse(response)
       setResult(payload)
     } catch (requestError) {
-      setError(requestError.message || 'Unable to analyze these details. Your entries were kept.')
+      const details = Array.isArray(requestError.details) && requestError.details.length ? ` ${requestError.details.join(' ')}` : ''
+      setError(`${requestError.message || 'Unable to analyze these details. Your entries were kept.'}${details}`)
     } finally { setBusy(false) }
   }
   const field = (key, label, options = {}) => <label className="assistant-field">{label}{options.help && <small>{options.help}</small>}<input type={options.type || 'text'} value={input[key]} min={options.min} step={options.step} onChange={event => update(key, event.target.value)} placeholder={options.placeholder} /></label>

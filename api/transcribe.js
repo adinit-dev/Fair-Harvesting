@@ -1,4 +1,5 @@
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024
+import { authenticateSupabaseRequest, bodySize, validateContentType } from './lib/requestSecurity.js'
 
 function json(res, status, body) {
   res.status(status).setHeader('Content-Type', 'application/json')
@@ -27,6 +28,14 @@ async function requestBody(req) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return json(res, 405, { error: 'POST is required.' })
+  try {
+    validateContentType(req, 'audio')
+    if (bodySize(req) > MAX_AUDIO_BYTES) return json(res, 413, { error: 'The recording is too large. Please record a shorter message.' })
+    const auth = await authenticateSupabaseRequest(req)
+    if (auth.configured && !auth.user) return json(res, auth.unavailable ? 503 : 401, { error: auth.unavailable ? 'Authentication service is temporarily unavailable.' : 'Authentication is required.' })
+  } catch (error) {
+    return json(res, error.statusCode || 400, { error: error.statusCode === 415 ? error.message : 'Invalid transcription request.' })
+  }
   const apiKey = process.env.GROQ_API_KEY?.trim()
   if (!apiKey) return json(res, 503, { error: 'Voice transcription is unavailable because GROQ_API_KEY is not configured. You can continue manually.' })
 
@@ -47,12 +56,16 @@ export default async function handler(req, res) {
     let transcription
     try {
       const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-        method: 'POST', signal: controller.signal,
-        headers: { Authorization: `Bearer ${apiKey}` }, body: form,
+        method: 'POST',
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
       })
-      if (!response.ok) throw new Error('The configured speech service rejected the recording.')
+      if (!response.ok) return json(res, 502, { error: 'The configured speech service rejected the recording. Please retry or enter details manually.' })
       transcription = await response.json()
-    } finally { clearTimeout(timeout) }
+    } finally {
+      clearTimeout(timeout)
+    }
 
     const text = typeof transcription?.text === 'string' ? transcription.text.trim() : ''
     if (!text) return json(res, 200, { text: '', error: 'No speech was detected. Please retry or type manually.' })
@@ -60,7 +73,7 @@ export default async function handler(req, res) {
   } catch (error) {
     const message = error.name === 'AbortError'
       ? 'Speech transcription timed out. Please retry with a shorter recording.'
-      : error.message || 'Voice analysis failed. Your recording was kept; please retry or enter details manually.'
+      : 'Voice analysis failed. Your recording was kept; please retry or enter details manually.'
     return json(res, 502, { error: message })
   }
 }

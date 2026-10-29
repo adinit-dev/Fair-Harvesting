@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, Bot, Camera, CheckCircle2, Mic, MicOff, Paperclip, RefreshCw } from 'lucide-react'
-import { readAssistantResponse } from '../lib/assistantApi.js'
+import { apiHeaders, apiUrl, readAssistantResponse } from '../lib/assistantApi.js'
 import { useAuth } from '../lib/auth.jsx'
 import { createListing, saveRequirement } from '../lib/data.js'
 import { buildFasalSaathiAssistantInput, createFasalSaathiInput, intentSpecificUnresolved, mergeFasalSaathiExtraction, missingFasalSaathiFields, validateFasalSaathiInput, validateProducePhoto } from '../lib/fasalSaathi.js'
 
 export default function FasalSaathi() {
-  const { user, demo, activeMode } = useAuth()
+  const { user, session, demo, activeMode } = useAuth()
   const mode = activeMode === 'buyer' ? 'buy' : 'sell'
   const [input, setInput] = useState(() => createFasalSaathiInput(activeMode === 'buyer' ? 'buy' : 'sell'))
   const [photo, setPhoto] = useState(null)
@@ -165,8 +165,8 @@ export default function FasalSaathi() {
       setTranscribing(true); setErrors([])
       try {
         const extension = audioBlob.type.includes('mp4') ? 'mp4' : audioBlob.type.includes('ogg') ? 'ogg' : 'webm'
-        const response = await fetch('/api/transcribe', {
-          method: 'POST', headers: { 'Content-Type': audioBlob.type || 'audio/webm', 'X-Fasal-Audio-Extension': extension }, body: audioBlob,
+        const response = await fetch(apiUrl('/api/transcribe'), {
+          method: 'POST', headers: apiHeaders(session, { 'Content-Type': audioBlob.type || 'audio/webm', 'X-Fasal-Audio-Extension': extension }), body: audioBlob,
         })
         const text = await response.text()
         let payload = {}
@@ -190,8 +190,8 @@ export default function FasalSaathi() {
     setExtracting(true)
     setErrors([])
     try {
-      const response = await fetch('/api/extract', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const response = await fetch(apiUrl('/api/extract'), {
+        method: 'POST', headers: apiHeaders(session, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ transcript: clean, mode: selectedMode }),
       })
       const raw = await response.text()
@@ -275,10 +275,13 @@ export default function FasalSaathi() {
     if (busy) return
     setBusy(true); setErrors([])
     try {
-      const response = await fetch('/api/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, input: buildFasalSaathiAssistantInput(input, mode) }) })
+      const response = await fetch(apiUrl('/api/assistant'), { method: 'POST', headers: apiHeaders(session, { 'Content-Type': 'application/json' }), body: JSON.stringify({ mode, input: buildFasalSaathiAssistantInput(input, mode) }) })
       const payload = await readAssistantResponse(response)
       setResult(payload)
-    } catch (error) { setErrors([error.message || 'Analysis could not be completed. Your entries were kept.']) }
+    } catch (error) {
+      const details = Array.isArray(error.details) && error.details.length ? ` ${error.details.join(' ')}` : ''
+      setErrors([`${error.message || 'Analysis could not be completed. Your entries were kept.'}${details}`])
+    }
     finally { setBusy(false) }
   }
 

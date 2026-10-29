@@ -1,4 +1,5 @@
 const MAX_BODY_BYTES = 32 * 1024
+import { authenticateSupabaseRequest, bodySize, validateContentType } from './lib/requestSecurity.js'
 
 function json(res, status, body) {
   res.status(status).setHeader('Content-Type', 'application/json')
@@ -58,7 +59,16 @@ export { normalizeExtraction }
 export default async function handler(req, res) {
   if (req.method !== 'POST') return json(res, 405, { error: 'POST is required.' })
   try {
+    validateContentType(req)
+    if (bodySize(req) > MAX_BODY_BYTES) return json(res, 413, { error: 'Request body is too large.' })
+    const auth = await authenticateSupabaseRequest(req)
+    if (auth.configured && !auth.user) return json(res, auth.unavailable ? 503 : 401, { error: auth.unavailable ? 'Authentication service is temporarily unavailable.' : 'Authentication is required.' })
+  } catch (error) {
+    return json(res, error.statusCode || 400, { error: error.statusCode === 415 ? error.message : 'Invalid extraction request.' })
+  }
+  try {
     const body = await readJson(req)
+    if (Buffer.byteLength(JSON.stringify(body)) > MAX_BODY_BYTES) return json(res, 413, { error: 'Request body is too large.' })
     const transcript = emptyString(body.transcript)
     const mode = body.mode === 'buy' ? 'buy' : 'sell'
     if (!transcript) return json(res, 400, { error: 'A transcript is required.' })

@@ -1,6 +1,8 @@
 import { isDemoMode, supabase } from './supabase'
 
 export const LISTING_IMAGE_BUCKET = 'produce-listing-images'
+export const LISTING_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+export const LISTING_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 
 export function friendlyMarketplaceError(error) {
   const message = error?.message || String(error || '')
@@ -18,10 +20,21 @@ export function getListingImageUrl(imagePath) {
   return supabase.storage.from(LISTING_IMAGE_BUCKET).getPublicUrl(imagePath).data.publicUrl
 }
 
+async function attachPublicProfiles(rows) {
+  const ids = [...new Set((rows || []).map(row => row.owner_id).filter(Boolean))]
+  if (!ids.length) return rows || []
+  const { data: profiles, error } = await supabase.from('public_profiles').select('id,display_name').in('id', ids)
+  if (error) return rows || []
+  const byId = new Map((profiles || []).map(profile => [profile.id, profile]))
+  return (rows || []).map(row => ({ ...row, profiles: byId.get(row.owner_id) || null }))
+}
+
 export async function uploadListingImage(file, userId) {
   if (isDemoMode) return { path: null, error: new Error('Supabase is not configured. Demo mode cannot upload listing photos.'), demo: true }
   if (!userId) return { path: null, error: new Error('You must be signed in to upload a listing photo.'), demo: false }
   if (!file) return { path: null, error: new Error('Select an image before uploading.'), demo: false }
+  if (!LISTING_IMAGE_TYPES.includes(file.type)) return { path: null, error: new Error('Choose a JPG, PNG, or WebP image.'), demo: false }
+  if (file.size > LISTING_IMAGE_MAX_BYTES) return { path: null, error: new Error('The image must be smaller than 5 MB.'), demo: false }
 
   const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
   const path = `${userId}/${crypto.randomUUID()}.${extension}`
@@ -37,11 +50,11 @@ export async function fetchActiveListings() {
 
   const { data, error } = await supabase
     .from('produce_listings')
-    .select('*, profiles(display_name)')
+    .select('*')
     .eq('status', 'active')
     .order('harvest_date', { ascending: false })
 
-  return { data, error, demo: false }
+  return { data: error ? data : await attachPublicProfiles(data), error, demo: false }
 }
 
 export async function fetchListingById(listingId) {
@@ -50,11 +63,11 @@ export async function fetchListingById(listingId) {
 
   const { data, error } = await supabase
     .from('produce_listings')
-    .select('*, profiles(display_name)')
+    .select('*')
     .eq('id', listingId)
     .maybeSingle()
 
-  return { data, error, demo: false }
+  return { data: error ? data : (await attachPublicProfiles(data ? [data] : []))[0] || null, error, demo: false }
 }
 
 export async function fetchOwnedListings(userId) {
@@ -102,10 +115,10 @@ export async function fetchActiveRequirements() {
   if (isDemoMode) return { data: null, error: null, demo: true }
   const { data, error } = await supabase
     .from('buyer_requirements')
-    .select('*, profiles(display_name)')
+    .select('*')
     .eq('status', 'active')
     .order('required_by', { ascending: true })
-  return { data: data || [], error: error ? friendlyMarketplaceError(error) : null, demo: false }
+  return { data: error ? data || [] : await attachPublicProfiles(data), error: error ? friendlyMarketplaceError(error) : null, demo: false }
 }
 
 export async function fetchRequirements(userId) {
@@ -131,6 +144,16 @@ export async function saveRequirement(requirement, userId) {
     .single()
 }
 
+export async function updateRequirement(id, changes, userId) {
+  if (isDemoMode) return { data: null, error: new Error('Supabase is not configured. Demo mode cannot update requirements.'), demo: true }
+  if (!id || !userId || !changes || typeof changes !== 'object') return { data: null, error: new Error('A requirement, owner, and changes are required.'), demo: false }
+  return supabase.from('buyer_requirements').update(changes).eq('id', id).eq('owner_id', userId).select().single()
+}
+
+export async function withdrawRequirement(id, userId) {
+  return updateRequirement(id, { status: 'withdrawn' }, userId)
+}
+
 export async function getOrCreateListingConversation({ listingId, buyerId, sellerId }) {
   if (isDemoMode) return { data: null, error: null, demo: true }
 
@@ -146,7 +169,13 @@ export async function getOrCreateListingConversation({ listingId, buyerId, selle
   }
 
   if (existing) {
-    return { data: existing, error: null, demo: false }
+    const { error: memberError } = await supabase
+      .from('conversation_members')
+      .upsert([
+        { conversation_id: existing.id, user_id: buyerId },
+        { conversation_id: existing.id, user_id: sellerId },
+      ], { onConflict: 'conversation_id,user_id' })
+    return { data: existing, error: memberError ? friendlyMarketplaceError(memberError) : null, demo: false }
   }
 
   const { data: created, error: createError } = await supabase
@@ -178,7 +207,13 @@ export async function getOrCreateRequirementConversation({ requirementId, farmer
   const { data: existing, error: lookupError } = await supabase
     .from('conversations').select('*').eq('requirement_id', requirementId).eq('created_by', farmerId).maybeSingle()
   if (lookupError) return { data: null, error: friendlyMarketplaceError(lookupError), demo: false }
-  if (existing) return { data: existing, error: null, demo: false }
+  if (existing) {
+    const { error: memberError } = await supabase.from('conversation_members').upsert([
+      { conversation_id: existing.id, user_id: farmerId },
+      { conversation_id: existing.id, user_id: buyerId },
+    ], { onConflict: 'conversation_id,user_id' })
+    return { data: existing, error: memberError ? friendlyMarketplaceError(memberError) : null, demo: false }
+  }
   const { data: created, error: createError } = await supabase
     .from('conversations').insert({ requirement_id: requirementId, created_by: farmerId }).select().single()
   if (createError) return { data: null, error: friendlyMarketplaceError(createError), demo: false }
@@ -193,7 +228,7 @@ export async function fetchConversations(userId) {
   if (isDemoMode) return { data: [], error: null, demo: true }
   if (!userId) return { data: [], error: new Error('A signed-in user is required.'), demo: false }
   const { data: memberships, error } = await supabase
-    .from('conversation_members').select('conversation_id, conversations(*, listing:listing_id(produce_name,owner_id,profiles(display_name)), demand:requirement_id(produce_name,owner_id,profiles(display_name)))').eq('user_id', userId)
+    .from('conversation_members').select('conversation_id, conversations(*, listing:listing_id(produce_name,owner_id), demand:requirement_id(produce_name,owner_id))').eq('user_id', userId)
   if (error) return { data: [], error: friendlyMarketplaceError(error), demo: false }
   const conversationIds = (memberships || []).map(item => item.conversation_id)
   let latest = []

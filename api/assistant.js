@@ -5,6 +5,7 @@ import { buildMandiBenchmark } from './lib/mandiBenchmark.js'
 import { fetchWeather } from './lib/weather.js'
 import { fetchPlatformListings } from './lib/platformListings.js'
 import { getStorageGuidance } from './lib/storageGuidance.js'
+import { authenticateSupabaseRequest, bodySize, validateContentType } from './lib/requestSecurity.js'
 
 const MAX_BODY_BYTES = 16 * 1024
 const requestTimestamps = new Map()
@@ -196,9 +197,18 @@ async function askGroq(mode, input, calculated, marketEvidence, weatherEvidence,
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return json(res, 405, { error: 'POST is required.' })
+  try {
+    validateContentType(req)
+    if (bodySize(req) > MAX_BODY_BYTES) return json(res, 413, { error: 'Request body is too large.' })
+    const auth = await authenticateSupabaseRequest(req)
+    if (auth.configured && !auth.user) return json(res, auth.unavailable ? 503 : 401, { error: auth.unavailable ? 'Authentication service is temporarily unavailable.' : 'Authentication is required.' })
+  } catch (error) {
+    return json(res, error.statusCode || 400, { error: error.statusCode === 415 ? error.message : 'Invalid assistant request.' })
+  }
   if (rateLimited(getClientKey(req))) return json(res, 429, { error: 'Too many requests. Please try again shortly.' })
   try {
     const body = await getBody(req)
+    if (Buffer.byteLength(JSON.stringify(body)) > MAX_BODY_BYTES) return json(res, 413, { error: 'Request body is too large.' })
     const mode = body.mode === 'buy' ? 'buy' : body.mode === 'sell' ? 'sell' : null
     if (!mode) return json(res, 400, { error: 'Invalid assistant request.' })
     const errors = [...validateCommonInput(body.input, mode), ...pastDateErrors(body.input, mode)]

@@ -1,3 +1,18 @@
+const configuredApiBase = String((import.meta.env || {}).VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
+
+export function apiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return `${configuredApiBase}${normalizedPath}`
+}
+
+export function apiHeaders(session, headers = {}) {
+  const token = session?.access_token
+  return {
+    ...headers,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
+
 export async function readAssistantResponse(response) {
   const text = await response.text()
   if (!text.trim()) {

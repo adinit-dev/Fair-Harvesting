@@ -3,37 +3,80 @@
 
 grant usage on schema public to authenticated;
 
+create or replace view public.public_profiles
+with (security_invoker = true)
+as select id, display_name from public.profiles;
+grant select on public.public_profiles to anon, authenticated;
+
 -- Add demand-offer linkage before policies reference requirement_id.
 alter table public.offers
   add column if not exists requirement_id uuid references public.buyer_requirements(id) on delete cascade;
 alter table public.offers alter column listing_id drop not null;
-alter table public.offers drop constraint if exists offers_target_check;
-alter table public.offers add constraint offers_target_check check (
-  (listing_id is not null and requirement_id is null)
-  or (listing_id is null and requirement_id is not null)
-);
+do $$
+declare invalid_count bigint;
+begin
+  select count(*) into invalid_count
+  from public.offers
+  where (listing_id is null and requirement_id is null)
+     or (listing_id is not null and requirement_id is not null);
+
+  if invalid_count > 0 then
+    raise exception
+      'Cannot add offers_target_check: % existing offer(s) reference zero or multiple targets',
+      invalid_count;
+  end if;
+
+  alter table public.offers
+    drop constraint if exists offers_target_check;
+  alter table public.offers
+    add constraint offers_target_check check (
+      (listing_id is not null and requirement_id is null)
+      or (listing_id is null and requirement_id is not null)
+    );
+end $$;
+
+-- Refuse to add the stricter conversation target invariant if existing data
+-- violates it. The constraint replacement is rerunnable and does not alter
+-- any rows.
+do $$
+declare invalid_count bigint;
+begin
+  select count(*) into invalid_count
+  from public.conversations
+  where (listing_id is null and requirement_id is null)
+     or (listing_id is not null and requirement_id is not null);
+
+  if invalid_count > 0 then
+    raise exception
+      'Cannot add conversations_exactly_one_target: % existing conversation(s) have zero or multiple targets',
+      invalid_count;
+  end if;
+
+  alter table public.conversations
+    drop constraint if exists conversations_exactly_one_target;
+  alter table public.conversations
+    add constraint conversations_exactly_one_target check (
+      (listing_id is not null and requirement_id is null)
+      or (listing_id is null and requirement_id is not null)
+    );
+end $$;
 
 -- Tables read or written by marketplace and messaging queries.
 grant select on table public.profiles to authenticated;
-grant select, insert, update on table public.produce_listings to authenticated;
-grant select, insert, update on table public.buyer_requirements to authenticated;
+grant select, insert, update, delete on table public.produce_listings to authenticated;
+grant select, insert, update, delete on table public.buyer_requirements to authenticated;
 grant select, insert on table public.conversations to authenticated;
 grant select, insert on table public.conversation_members to authenticated;
 grant select, insert on table public.messages to authenticated;
 grant select, insert, update on table public.offers to authenticated;
 
-alter table public.profiles enable row level security;
 alter table public.produce_listings enable row level security;
+alter table public.profiles enable row level security;
 alter table public.buyer_requirements enable row level security;
 alter table public.conversations enable row level security;
 alter table public.conversation_members enable row level security;
 alter table public.messages enable row level security;
 alter table public.offers enable row level security;
-
--- Display names are used by authenticated marketplace listings.
-drop policy if exists "Profiles are readable by authenticated users" on public.profiles;
-create policy "Profiles are readable by authenticated users" on public.profiles
-  for select to authenticated using (true);
 
 -- Buyer demand policies.
 drop policy if exists "Owners read requirements" on public.buyer_requirements;
@@ -79,6 +122,25 @@ alter function public.is_conversation_member(uuid) owner to postgres;
 revoke execute on function public.is_conversation_member(uuid) from public;
 grant execute on function public.is_conversation_member(uuid) to authenticated;
 
+drop policy if exists "Profiles are readable by authenticated users" on public.profiles;
+drop policy if exists "Users read their own profile" on public.profiles;
+create policy "Users read relevant profiles" on public.profiles
+  for select to authenticated using (
+    id = auth.uid()
+    or exists (
+      select 1 from public.produce_listings l
+      where l.owner_id = id and l.status = 'active'
+    )
+    or exists (
+      select 1 from public.buyer_requirements r
+      where r.owner_id = id and r.status = 'active'
+    )
+    or exists (
+      select 1 from public.conversation_members cm
+      where cm.user_id = id and public.is_conversation_member(cm.conversation_id)
+    )
+  );
+
 -- Conversation policies.
 drop policy if exists "Members read conversations" on public.conversations;
 create policy "Members read conversations" on public.conversations
@@ -121,6 +183,11 @@ create policy "Relevant users join conversations" on public.conversation_members
           c.created_by = auth.uid()
           or l.owner_id = auth.uid()
           or r.owner_id = auth.uid()
+        )
+        and (
+          user_id = auth.uid()
+          or user_id = l.owner_id
+          or user_id = r.owner_id
         )
     )
   );
@@ -216,22 +283,46 @@ returns trigger language plpgsql security invoker set search_path = public
 as $$
 declare
   listing_owner uuid;
+  listing_state public.listing_status;
   requirement_owner uuid;
+  requirement_state public.requirement_status;
 begin
+  if tg_op = 'INSERT' and new.status is distinct from 'pending' then
+    raise exception 'New offers must start in pending status';
+  end if;
+
   if new.listing_id is not null and new.requirement_id is null then
-    select owner_id into listing_owner from public.produce_listings where id = new.listing_id;
-    if listing_owner is null or listing_owner <> new.seller_id or new.buyer_id = new.seller_id then
+    select owner_id, status into listing_owner, listing_state
+      from public.produce_listings where id = new.listing_id;
+    if listing_owner is null
+      or listing_owner <> new.seller_id
+      or new.buyer_id = new.seller_id then
       raise exception 'Offer parties do not match the listing';
     end if;
-    if exists (select 1 from public.conversations c where c.id = new.conversation_id and c.listing_id is distinct from new.listing_id) then
+    if tg_op = 'INSERT' and listing_state <> 'active' then
+      raise exception 'Offers can be created only for active listings';
+    end if;
+    if not exists (
+      select 1 from public.conversations c
+      where c.id = new.conversation_id and c.listing_id = new.listing_id
+    ) then
       raise exception 'Offer conversation does not match the listing';
     end if;
   elsif new.listing_id is null and new.requirement_id is not null then
-    select owner_id into requirement_owner from public.buyer_requirements where id = new.requirement_id;
-    if requirement_owner is null or requirement_owner <> new.buyer_id or new.buyer_id = new.seller_id then
+    select owner_id, status into requirement_owner, requirement_state
+      from public.buyer_requirements where id = new.requirement_id;
+    if requirement_owner is null
+      or requirement_owner <> new.buyer_id
+      or new.buyer_id = new.seller_id then
       raise exception 'Offer parties do not match the buyer demand';
     end if;
-    if exists (select 1 from public.conversations c where c.id = new.conversation_id and c.requirement_id is distinct from new.requirement_id) then
+    if tg_op = 'INSERT' and requirement_state <> 'active' then
+      raise exception 'Offers can be created only for active buyer demands';
+    end if;
+    if not exists (
+      select 1 from public.conversations c
+      where c.id = new.conversation_id and c.requirement_id = new.requirement_id
+    ) then
       raise exception 'Offer conversation does not match the buyer demand';
     end if;
   else
@@ -239,14 +330,54 @@ begin
   end if;
 
   if tg_op = 'UPDATE' and (
-    new.listing_id is distinct from old.listing_id
+    new.id is distinct from old.id
+    or new.created_at is distinct from old.created_at
+    or new.listing_id is distinct from old.listing_id
     or new.requirement_id is distinct from old.requirement_id
-    or new.buyer_id <> old.buyer_id
-    or new.seller_id <> old.seller_id
-    or new.conversation_id <> old.conversation_id
+    or new.buyer_id is distinct from old.buyer_id
+    or new.seller_id is distinct from old.seller_id
+    or new.conversation_id is distinct from old.conversation_id
   ) then
-    raise exception 'Offer ownership fields cannot change';
+    raise exception 'Offer identity and creation fields cannot change';
   end if;
+
+  if tg_op = 'UPDATE' and (
+    new.quantity is distinct from old.quantity
+    or new.price_per_unit is distinct from old.price_per_unit
+    or new.unit is distinct from old.unit
+    or new.note is distinct from old.note
+  ) and not (
+    (
+      (new.listing_id is not null and auth.uid() = new.seller_id)
+      or (new.requirement_id is not null and auth.uid() = new.buyer_id)
+    )
+    and old.status in ('pending', 'countered')
+    and new.status = 'countered'
+  ) then
+    raise exception 'Offer terms can change only through a recipient counteroffer';
+  end if;
+
+  if tg_op = 'UPDATE' and new.status is distinct from old.status then
+    if new.status = 'withdrawn' then
+      if not (
+        (new.listing_id is not null and auth.uid() = new.buyer_id)
+        or (new.requirement_id is not null and auth.uid() = new.seller_id)
+      )
+      or old.status not in ('pending', 'countered') then
+        raise exception 'Only the offer sender can withdraw it';
+      end if;
+    elsif not (
+      (
+        (new.listing_id is not null and auth.uid() = new.seller_id)
+        or (new.requirement_id is not null and auth.uid() = new.buyer_id)
+      )
+      and old.status in ('pending', 'countered')
+      and new.status in ('accepted', 'rejected', 'countered')
+    ) then
+      raise exception 'Invalid offer status transition';
+    end if;
+  end if;
+
   return new;
 end $$;
 

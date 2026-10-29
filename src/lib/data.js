@@ -2,6 +2,15 @@ import { isDemoMode, supabase } from './supabase'
 
 export const LISTING_IMAGE_BUCKET = 'produce-listing-images'
 
+export function friendlyMarketplaceError(error) {
+  const message = error?.message || String(error || '')
+  const permissionDenied = error?.code === '42501' || /permission denied for table|row-level security|not authorized/i.test(message)
+  if (permissionDenied) {
+    return new Error('Marketplace database access is not configured yet. Ask the workspace administrator to apply the latest Supabase permissions migration.')
+  }
+  return error instanceof Error ? error : new Error(message || 'The marketplace request could not be completed.')
+}
+
 export function getListingImageUrl(imagePath) {
   if (!imagePath) return null
   if (/^(https?:|blob:)/.test(imagePath)) return imagePath
@@ -89,6 +98,16 @@ export async function withdrawListing(id, userId) {
   return updateListing(id, { status: 'withdrawn' }, userId)
 }
 
+export async function fetchActiveRequirements() {
+  if (isDemoMode) return { data: null, error: null, demo: true }
+  const { data, error } = await supabase
+    .from('buyer_requirements')
+    .select('*, profiles(display_name)')
+    .eq('status', 'active')
+    .order('required_by', { ascending: true })
+  return { data: data || [], error: error ? friendlyMarketplaceError(error) : null, demo: false }
+}
+
 export async function fetchRequirements(userId) {
   if (isDemoMode) return { data: null, error: null, demo: true }
 
@@ -123,7 +142,7 @@ export async function getOrCreateListingConversation({ listingId, buyerId, selle
     .maybeSingle()
 
   if (lookupError && lookupError.code !== 'PGRST116') {
-    return { data: null, error: lookupError, demo: false }
+    return { data: null, error: friendlyMarketplaceError(lookupError), demo: false }
   }
 
   if (existing) {
@@ -136,7 +155,7 @@ export async function getOrCreateListingConversation({ listingId, buyerId, selle
     .select()
     .single()
 
-  if (createError) return { data: null, error: createError, demo: false }
+  if (createError) return { data: null, error: friendlyMarketplaceError(createError), demo: false }
 
   const members = [
     { conversation_id: created.id, user_id: buyerId },
@@ -148,10 +167,44 @@ export async function getOrCreateListingConversation({ listingId, buyerId, selle
     .upsert(members, { onConflict: 'conversation_id,user_id' })
 
   if (memberError) {
-    return { data: created, error: memberError, demo: false }
+    return { data: created, error: friendlyMarketplaceError(memberError), demo: false }
   }
 
   return { data: created, error: null, demo: false }
+}
+
+export async function getOrCreateRequirementConversation({ requirementId, farmerId, buyerId }) {
+  if (isDemoMode) return { data: null, error: null, demo: true }
+  const { data: existing, error: lookupError } = await supabase
+    .from('conversations').select('*').eq('requirement_id', requirementId).eq('created_by', farmerId).maybeSingle()
+  if (lookupError) return { data: null, error: friendlyMarketplaceError(lookupError), demo: false }
+  if (existing) return { data: existing, error: null, demo: false }
+  const { data: created, error: createError } = await supabase
+    .from('conversations').insert({ requirement_id: requirementId, created_by: farmerId }).select().single()
+  if (createError) return { data: null, error: friendlyMarketplaceError(createError), demo: false }
+  const { error: memberError } = await supabase.from('conversation_members').upsert([
+    { conversation_id: created.id, user_id: farmerId },
+    { conversation_id: created.id, user_id: buyerId },
+  ], { onConflict: 'conversation_id,user_id' })
+  return { data: created, error: memberError ? friendlyMarketplaceError(memberError) : null, demo: false }
+}
+
+export async function fetchConversations(userId) {
+  if (isDemoMode) return { data: [], error: null, demo: true }
+  if (!userId) return { data: [], error: new Error('A signed-in user is required.'), demo: false }
+  const { data: memberships, error } = await supabase
+    .from('conversation_members').select('conversation_id, conversations(*, listing:listing_id(produce_name,owner_id,profiles(display_name)), demand:requirement_id(produce_name,owner_id,profiles(display_name)))').eq('user_id', userId)
+  if (error) return { data: [], error: friendlyMarketplaceError(error), demo: false }
+  const conversationIds = (memberships || []).map(item => item.conversation_id)
+  let latest = []
+  if (conversationIds.length) {
+    const { data, error: messageError } = await supabase.from('messages').select('conversation_id,body,created_at,sender_id').in('conversation_id', conversationIds).order('created_at', { ascending: false })
+    if (messageError) return { data: [], error: friendlyMarketplaceError(messageError), demo: false }
+    latest = data || []
+  }
+  const byConversation = new Map()
+  latest.forEach(message => { if (!byConversation.has(message.conversation_id)) byConversation.set(message.conversation_id, message) })
+  return { data: (memberships || []).map(item => ({ ...item.conversations, latest_message: byConversation.get(item.conversation_id) || null })).sort((a, b) => new Date(b.updated_at || b.latest_message?.created_at || b.created_at) - new Date(a.updated_at || a.latest_message?.created_at || a.created_at)), error: null, demo: false }
 }
 
 export async function fetchConversationMessages(conversationId) {
@@ -190,6 +243,25 @@ export async function fetchListingOffers(listingId) {
     .order('created_at', { ascending: false })
 
   return { data: data || [], error, demo: false }
+}
+
+export async function createRequirementOffer({ conversationId, requirementId, farmerId, buyerId, quantity, pricePerUnit, unit, note }) {
+  if (isDemoMode) return { data: null, error: new Error('Demo mode cannot save offers.'), demo: true }
+  if (!conversationId || !requirementId || !farmerId || !buyerId || !quantity || !Number.isFinite(Number(pricePerUnit)) || !unit) {
+    return { data: null, error: new Error('Offer details are incomplete.'), demo: false }
+  }
+  return supabase.from('offers').insert({
+    conversation_id: conversationId,
+    requirement_id: requirementId,
+    listing_id: null,
+    buyer_id: buyerId,
+    seller_id: farmerId,
+    quantity: Number(quantity),
+    price_per_unit: Number(pricePerUnit),
+    unit,
+    note: note?.trim() || null,
+    status: 'pending',
+  }).select().single()
 }
 
 export async function createOffer({ conversationId, listingId, buyerId, sellerId, quantity, pricePerUnit, unit, note }) {

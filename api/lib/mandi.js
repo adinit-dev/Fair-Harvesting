@@ -1,6 +1,7 @@
 const MANDI_API_BASE = 'https://api.data.gov.in/resource'
 const DEFAULT_TIMEOUT_MS = 8000
 const MAX_OBSERVATION_AGE_DAYS = 7
+const mandiCache = new Map()
 
 function getConfig() {
   const apiKey = process.env.DATA_GOV_IN_API_KEY?.trim()
@@ -19,7 +20,14 @@ function firstValue(record, names) {
   return null
 }
 
-function normalizeRecord(record, retrievedAt, priceUnit) {
+function normalizeObservationDate(value) {
+  const text = String(value || '').trim()
+  const match = text.match(/^([0-3]\d)[/-]([01]\d)[/-](\d{4})(?:\s.*)?$/)
+  if (!match) return text
+  return `${match[3]}-${match[2]}-${match[1]}`
+}
+
+function normalizeRecord(record, retrievedAt, priceUnit, resourceId) {
   return {
     state: firstValue(record, ['state', 'State']),
     district: firstValue(record, ['district', 'District']),
@@ -27,24 +35,32 @@ function normalizeRecord(record, retrievedAt, priceUnit) {
     commodity: firstValue(record, ['commodity', 'Commodity']),
     variety: firstValue(record, ['variety', 'Variety']),
     grade: firstValue(record, ['grade', 'Grade']),
-    observationDate: firstValue(record, ['arrival_date', 'Arrival_Date', 'arrival date', 'date']),
+    observationDate: normalizeObservationDate(firstValue(record, ['arrival_date', 'Arrival_Date', 'arrival date', 'date'])),
     minPrice: firstValue(record, ['min_price', 'Min Price', 'min_price_per_quintal']),
     maxPrice: firstValue(record, ['max_price', 'Max Price', 'max_price_per_quintal']),
     modalPrice: firstValue(record, ['modal_price', 'Modal Price', 'modal_price_per_quintal']),
     priceUnit,
     source: 'data.gov.in',
+    sourceId: `data.gov.in:${resourceId}`,
+    sourceUrl: `https://data.gov.in/resource/${encodeURIComponent(resourceId)}`,
     retrievedAt,
   }
 }
 
-export async function fetchMandiObservations({ commodity, state, district, market, limit = 100 } = {}) {
+export async function fetchMandiObservations({ commodity, state, district, market, limit = 100, options = {} } = {}) {
   const config = getConfig()
   if (config.error) return { data: [], error: config.error, available: false }
   if (!String(commodity || '').trim()) return { data: [], error: new Error('A commodity is required to retrieve mandi observations.'), available: false }
 
   const retrievedAt = new Date().toISOString()
+  const cacheKey = JSON.stringify({ commodity, state, district, market, resourceId: config.resourceId })
+  const cached = mandiCache.get(cacheKey)
+  const cacheTtlMs = options.cacheTtlMs ?? 30 * 60 * 1000
+  if (cached && Date.now() - cached.cachedAt < cacheTtlMs) return cached.value
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const fetchImpl = options.fetchImpl || globalThis.fetch
   const params = new URLSearchParams({
     'api-key': config.apiKey,
     format: 'json',
@@ -56,11 +72,14 @@ export async function fetchMandiObservations({ commodity, state, district, marke
   if (market) params.set('filters[Market]', String(market).trim())
 
   try {
-    const response = await fetch(`${MANDI_API_BASE}/${encodeURIComponent(config.resourceId)}?${params}`, { signal: controller.signal })
+    const response = await fetchImpl(`${MANDI_API_BASE}/${encodeURIComponent(config.resourceId)}?${params}`, { signal: controller.signal })
+    if (response.status === 401 || response.status === 403) throw new Error('Mandi data authentication was rejected by the provider.')
+    if (response.status === 429) throw new Error('Mandi data provider rate limit reached.')
+    if (response.status === 404) throw new Error('Configured mandi data resource ID was not found.')
     if (!response.ok) throw new Error(`Mandi data provider returned HTTP ${response.status}.`)
     const payload = await response.json()
     if (!Array.isArray(payload.records)) throw new Error('Mandi data response did not contain a records array.')
-    const records = payload.records.map((record) => normalizeRecord(record, retrievedAt, config.priceUnit))
+    const records = payload.records.map((record) => normalizeRecord(record, retrievedAt, config.priceUnit, config.resourceId))
     if (records.length === 0) throw new Error('No matching mandi observations were returned.')
     if (records.some(record => !record.commodity || !record.observationDate || record.modalPrice === null)) {
       throw new Error('Mandi data response fields or price units could not be verified for this resource.')
@@ -69,7 +88,7 @@ export async function fetchMandiObservations({ commodity, state, district, marke
     if (records.some(record => Number.isNaN(Date.parse(record.observationDate)) || Date.parse(record.observationDate) < cutoff)) {
       throw new Error(`Mandi observations are older than the ${MAX_OBSERVATION_AGE_DAYS}-day evidence window.`)
     }
-    return {
+    const result = {
       data: records,
       error: null,
       available: true,
@@ -77,6 +96,8 @@ export async function fetchMandiObservations({ commodity, state, district, marke
       resourceId: config.resourceId,
       retrievedAt,
     }
+    mandiCache.set(cacheKey, { cachedAt: Date.now(), value: result })
+    return result
   } catch (error) {
     return {
       data: [],
@@ -87,3 +108,5 @@ export async function fetchMandiObservations({ commodity, state, district, marke
     clearTimeout(timeout)
   }
 }
+
+export { mandiCache }

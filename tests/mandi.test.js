@@ -55,6 +55,45 @@ test('rejects empty and stale mandi observations', async () => {
   }
 })
 
+test('distinguishes invalid resources and provider authentication failures', async () => {
+  const previousFetch = globalThis.fetch
+  const config = {
+    DATA_GOV_IN_API_KEY: 'test-key',
+    DATA_GOV_IN_RESOURCE_ID: 'test-resource',
+    DATA_GOV_IN_PRICE_UNIT: 'INR per quintal',
+  }
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 404 })
+    const missing = await withEnv(config, () => fetchMandiObservations({ commodity: 'Rice' }))
+    assert.equal(missing.available, false)
+    assert.match(missing.error.message, /resource ID was not found/i)
+
+    globalThis.fetch = async () => ({ ok: false, status: 403 })
+    const denied = await withEnv(config, () => fetchMandiObservations({ commodity: 'Rice' }))
+    assert.equal(denied.available, false)
+    assert.match(denied.error.message, /authentication was rejected/i)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('rejects malformed provider payloads', async () => {
+  const previousFetch = globalThis.fetch
+  const config = {
+    DATA_GOV_IN_API_KEY: 'test-key',
+    DATA_GOV_IN_RESOURCE_ID: 'test-resource',
+    DATA_GOV_IN_PRICE_UNIT: 'INR per quintal',
+  }
+  try {
+    globalThis.fetch = async () => ({ ok: true, status: 200, async json() { return { total: 0 } } })
+    const result = await withEnv(config, () => fetchMandiObservations({ commodity: 'Rice' }))
+    assert.equal(result.available, false)
+    assert.match(result.error.message, /records array/i)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('preserves verified unit and source metadata for recent observations', async () => {
   const previousFetch = globalThis.fetch
   const config = {

@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:api": "npx --no-install vercel dev",
     "build": "vite build",
     "lint": "oxlint",
     "test:assistant-live": "node scripts/test-assistant-live.mjs",
     "test:calculations": "node --test tests/assistantCalculations.test.js",
-    "test:assistant": "node --test tests/assistantCalculations.test.js tests/assistantEndpoint.test.js tests/mandi.test.js tests/transport.test.js",
+    "test:assistant": "node --test tests/assistantCalculations.test.js tests/assistantEndpoint.test.js tests/mandi.test.js tests/transport.test.js tests/weather.test.js tests/fasalSaathi.test.js tests/platformListings.test.js tests/authValidation.test.js",
+    "test:fasalsaathi": "node --test tests/fasalSaathi.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

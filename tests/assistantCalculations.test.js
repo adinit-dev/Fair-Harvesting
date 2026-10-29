@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildPurchaseComparison, buildSellingScenarios, costPerUnit, estimatedNetProceeds, grossProduceValue, pricePerKg, quantityInKg, validateCommonInput } from '../src/lib/assistantCalculations.js'
+import { buildPurchaseComparison, buildSellDecision, buildSellingScenarios, costPerUnit, estimatedNetProceeds, grossProduceValue, pricePerKg, quantityInKg, validateCommonInput } from '../src/lib/assistantCalculations.js'
 
 test('calculates gross value and net proceeds deterministically', () => {
   assert.equal(grossProduceValue(100, 25), 2500)
@@ -123,6 +123,25 @@ test('distinguishes zero entered costs from a zero total and avoids freshness cl
   assert.equal(result[0].netProceeds, null)
   assert.match(result[1].freshnessConcern, /unknown/)
   assert.doesNotMatch(result[1].freshnessConcern, /may affect freshness/)
+})
+
+test('sell decision uses market benchmark as reference and never invents a hold forecast', () => {
+  const result = buildSellDecision({ quantity: 40, unit: 'kg', currentOffer: '', confirmedBuyer: 'unknown' }, {
+    available: true,
+    medianModalPricePerKg: 80,
+    suggestedMinPricePerKg: 75,
+    suggestedMaxPricePerKg: 85,
+    explanation: 'Verified wholesale benchmark.',
+  })
+  assert.equal(result.suggestedAskingPrice.median, 80)
+  assert.equal(result.hold.available, false)
+  assert.match(result.hold.reason, /cannot currently be estimated reliably/)
+})
+
+test('sell decision is insufficient evidence without comparable mandi observations', () => {
+  const result = buildSellDecision({ quantity: 40, unit: 'kg', currentOffer: '', confirmedBuyer: 'unknown' }, { available: false })
+  assert.equal(result.action, 'Insufficient evidence')
+  assert.equal(result.suggestedAskingPrice, null)
 })
 
 test('rejects invalid prices before any recommendation can be calculated', () => {

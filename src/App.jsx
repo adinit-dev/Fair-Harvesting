@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ArrowRight,
   BadgeCheck,
   Bot,
   Clock3,
+  ChevronDown,
+  Eye,
+  EyeOff,
   Filter,
+  LogOut,
   MapPin,
   Menu,
   Package,
@@ -15,18 +19,26 @@ import {
   Sprout,
   Star,
   TrendingUp,
-  Users,
+  UserCircle,
   X,
 } from 'lucide-react'
 import './App.css'
+import { readAssistantResponse } from './lib/assistantApi.js'
+import FasalSaathi from './components/FasalSaathi.jsx'
+import LandingIntro from './components/LandingIntro.jsx'
 import { useAuth, ProtectedRoute } from './lib/auth.jsx'
+import { validateLogin, validateRegistration } from './lib/authValidation.js'
 import {
   createListing,
   fetchActiveListings,
   fetchOwnedListings,
   fetchListingById,
   fetchRequirements,
+  fetchActiveRequirements,
   saveRequirement,
+  createRequirementOffer,
+  getOrCreateRequirementConversation,
+  fetchConversations,
   updateListing,
   getListingImageUrl,
   uploadListingImage,
@@ -139,44 +151,98 @@ function DemoBanner() {
   return (
     <div className="demo-banner">
       <Sparkles size={14} />
-      <span><strong>Demo mode</strong> · Showing sample marketplace data. Connect Supabase to enable live listings and authentication.</span>
+      <span><strong>Demo mode</strong> Â· Showing sample marketplace data. Connect Supabase to enable live listings and authentication.</span>
       <Link to="/settings">Configure services <ArrowRight size={13} /></Link>
     </div>
   )
 }
 
+function useDesktopNavigation() {
+  const [desktopNavigation, setDesktopNavigation] = useState(() => window.matchMedia('(min-width: 681px)').matches)
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 681px)')
+    const update = () => setDesktopNavigation(media.matches)
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  return desktopNavigation
+}
+
 function Header() {
   const [open, setOpen] = useState(false)
-  const { session, signOut } = useAuth()
+  const [profileOpen, setProfileOpen] = useState(false)
+  const desktopNavigation = useDesktopNavigation()
+  const { session, profile, signOut, activeMode, setActiveMode } = useAuth()
+  const navigate = useNavigate()
   const location = useLocation()
+  const displayName = profile?.display_name || session?.user?.user_metadata?.display_name || session?.user?.email || 'FairHarvest user'
+  const initials = displayName.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase()
+
+  async function handleSignOut() {
+    await signOut()
+    setProfileOpen(false)
+    navigate('/')
+  }
 
   return (
     <header className="site-header">
       <div className="container nav-row">
         <Logo />
         <nav className={open ? 'nav-links open' : 'nav-links'}>
-          {[['Marketplace', '/marketplace'], ['How it works', '/#how-it-works'], ['For farmers', '/dashboard/farmer'], ['For buyers', '/dashboard/buyer']].map(([label, href]) => (
+          {[['Marketplace', '/marketplace'], ['Dashboard', `/dashboard/${activeMode}`]].map(([label, href]) => (
             <NavLink key={label} to={href} className={({ isActive }) => (isActive && location.pathname !== '/' ? 'active' : '')} onClick={() => setOpen(false)}>
               {label}
             </NavLink>
           ))}
+          {session && <NavLink to="/messages" className={({ isActive }) => isActive ? 'active' : ''} onClick={() => setOpen(false)}>Messages</NavLink>}
+          {!desktopNavigation && (session ? <><div className="mobile-mode-toggle" role="group" aria-label="Active account mode"><button type="button" className={activeMode === 'farmer' ? 'active' : ''} aria-pressed={activeMode === 'farmer'} onClick={() => setActiveMode('farmer')}>Farmer</button><button type="button" className={activeMode === 'buyer' ? 'active' : ''} aria-pressed={activeMode === 'buyer'} onClick={() => setActiveMode('buyer')}>Buyer</button></div><Link to="/profile" onClick={() => setOpen(false)}>Profile</Link></> : <><Link to="/auth" onClick={() => setOpen(false)}>Sign in</Link><Link to="/auth?role=farmer" onClick={() => setOpen(false)}>Join FairHarvest</Link></>)}
         </nav>
         <div className="nav-actions">
-          {session ? (
-            <button type="button" onClick={signOut} className="btn btn-outline hide-mobile">Sign out</button>
-          ) : (
+          {desktopNavigation && session ? (
             <>
-              <Link to="/auth" className="btn btn-outline hide-mobile">Sign in</Link>
-              <Link to="/auth?role=farmer" className="btn btn-primary hide-mobile">Join FairHarvest <ArrowRight size={16} /></Link>
+              <div className="global-mode-toggle" role="group" aria-label="Active account mode">
+                {['farmer', 'buyer'].map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={activeMode === mode ? 'active' : ''}
+                    aria-pressed={activeMode === mode}
+                    onClick={() => setActiveMode(mode)}
+                  >{mode === 'farmer' ? 'Farmer' : 'Buyer'}</button>
+                ))}
+              </div>
+              <div className="profile-menu">
+              <button type="button" className="profile-menu-button" aria-expanded={profileOpen} aria-haspopup="menu" onClick={() => setProfileOpen(value => !value)}>
+                <span className="profile-avatar">{initials}</span>
+                <span>{displayName}</span>
+                <ChevronDown size={15} />
+              </button>
+              {profileOpen && (
+                <div className="profile-dropdown" role="menu">
+                  <Link to="/profile" role="menuitem" onClick={() => setProfileOpen(false)}><UserCircle size={17} /> Profile</Link>
+                  <button type="button" role="menuitem" onClick={handleSignOut}><LogOut size={17} /> Sign out</button>
+                </div>
+              )}
+            </div>
             </>
-          )}
-          <button type="button" className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">
+          ) : desktopNavigation ? (
+            <>
+              <Link to="/auth" className="btn btn-outline">Sign in</Link>
+              <Link to="/auth?role=farmer" className="btn btn-primary">Join FairHarvest <ArrowRight size={16} /></Link>
+            </>
+          ) : null}
+          {!desktopNavigation && <button type="button" className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">
             {open ? <X /> : <Menu />}
-          </button>
+          </button>}
         </div>
       </div>
     </header>
   )
+}
+
+function ModeRoute({ role, children }) {
+  const { activeMode } = useAuth()
+  return activeMode === role ? children : <Navigate to={`/dashboard/${activeMode}`} replace />
 }
 
 function Layout({ children }) {
@@ -189,23 +255,10 @@ function Layout({ children }) {
         <div className="container footer-row">
           <Logo />
           <span>Building a fairer food system for Northeast India.</span>
-          <span>© 2025 FairHarvest</span>
+          <span>Â© 2025 FairHarvest</span>
         </div>
       </footer>
     </>
-  )
-}
-
-function SectionTitle({ eyebrow, title, copy, action }) {
-  return (
-    <div className="section-title">
-      <div>
-        <div className="eyebrow">{eyebrow}</div>
-        <h2>{title}</h2>
-        {copy && <p>{copy}</p>}
-      </div>
-      {action}
-    </div>
   )
 }
 
@@ -215,12 +268,11 @@ function Home() {
       <section className="hero-section">
         <div className="container hero-grid">
           <div className="hero-copy">
-            <div className="eyebrow"><span className="eyebrow-dot" /> Northeast India’s trusted harvest network</div>
+            <div className="eyebrow"><span className="eyebrow-dot" /> Northeast Indiaâ€™s trusted harvest network</div>
             <h1>Your harvest.<br /><em>Your market.</em><br />Your decision.</h1>
             <p className="hero-lead">A better way for farmers to find the right buyers, and for buyers to source exceptional produce directly from the people who grow it.</p>
             <div className="hero-actions">
               <Link to="/marketplace" className="btn btn-primary btn-large">Explore the marketplace <ArrowRight size={18} /></Link>
-              <Link to="/auth?role=farmer" className="text-link">I’m a farmer <ArrowRight size={16} /></Link>
             </div>
             <div className="trust-row">
               <div className="avatar-stack"><span>R</span><span>M</span><span>S</span><span>+</span></div>
@@ -231,7 +283,7 @@ function Home() {
             <div className="hero-photo" />
             <div className="hero-float-card float-top"><span className="float-icon"><BadgeCheck size={18} /></span><div><strong>Verified harvest</strong><small>Freshness score 96%</small></div></div>
             <div className="hero-float-card float-bottom"><div className="mini-chart"><TrendingUp size={18} /></div><div><strong>Fair prices, always</strong><small>Direct from the farm</small></div></div>
-            <div className="hero-location"><MapPin size={14} /> Meghalaya · India</div>
+            <div className="hero-location"><MapPin size={14} /> Meghalaya Â· India</div>
           </div>
         </div>
       </section>
@@ -240,31 +292,11 @@ function Home() {
         <div className="container stats-grid">
           <div><strong>2,400+</strong><span>Farmers onboarded</span></div>
           <div><strong>18</strong><span>Districts connected</span></div>
-          <div><strong>₹4.2 Cr</strong><span>Value traded</span></div>
+          <div><strong>â‚¹4.2 Cr</strong><span>Value traded</span></div>
           <div><strong>96%</strong><span>On-time fulfillment</span></div>
         </div>
       </section>
 
-      <section id="how-it-works" className="section">
-        <div className="container">
-          <SectionTitle eyebrow="A simpler way forward" title="Good food starts with good connections." copy="Everything you need to move your harvest from the field to the right hands." />
-          <div className="feature-grid">
-            {[
-              { icon: <Sprout />, n: '01', t: 'List your harvest', d: 'Share what you grow, when it’s ready, and what makes it special.' },
-              { icon: <Users />, n: '02', t: 'Find your match', d: 'Our rules-based matching connects you with serious, relevant partners.' },
-              { icon: <ShieldCheck />, n: '03', t: 'Trade with clarity', d: 'Transparent freshness, fair offers, and conversations that stay human.' },
-            ].map((item) => (
-              <div key={item.n} className="feature-card">
-                <div className="feature-icon">{item.icon}</div>
-                <span className="feature-number">{item.n}</span>
-                <h3>{item.t}</h3>
-                <p>{item.d}</p>
-                <ArrowRight size={18} className="feature-arrow" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
 
       <section className="section section-tint">
         <div className="container split-promo">
@@ -272,11 +304,11 @@ function Home() {
             <div className="eyebrow">Built for both sides</div>
             <h2>More than a marketplace.<br /><em>A growing community.</em></h2>
             <p>From a small family farm in Nagaland to a restaurant in Guwahati, FairHarvest makes every step more transparent and every decision more informed.</p>
-            <Link to="/marketplace" className="btn btn-dark">See what’s fresh <ArrowRight size={17} /></Link>
+            <Link to="/marketplace" className="btn btn-dark">See whatâ€™s fresh <ArrowRight size={17} /></Link>
           </div>
           <div className="quote-card">
-            <div className="quote-mark">“</div>
-            <p>FairHarvest helped us find a buyer who values our Lakadong turmeric. We’re getting a fair price and planning our next crop with confidence.</p>
+            <div className="quote-mark">â€œ</div>
+            <p>FairHarvest helped us find a buyer who values our Lakadong turmeric. Weâ€™re getting a fair price and planning our next crop with confidence.</p>
             <div className="quote-person">
               <div className="avatar avatar-green">P</div>
               <div><strong>Pema Lyngdoh</strong><small>Farmer, West Jaintia Hills</small></div>
@@ -290,119 +322,92 @@ function Home() {
 }
 
 function Marketplace() {
+  const { user, activeMode } = useAuth()
   const [query, setQuery] = useState('')
-  const [type, setType] = useState('all')
-  const [items, setItems] = useState(demoListings)
+  const [filter, setFilter] = useState('all')
+  const [items, setItems] = useState(isDemoMode ? demoListings.map(entry => ({ ...entry, kind: 'listing' })) : [])
+  const [demands, setDemands] = useState([])
   const [loading, setLoading] = useState(!isDemoMode)
   const [loadError, setLoadError] = useState('')
+  const [demandOffer, setDemandOffer] = useState(null)
+  const [offerPrice, setOfferPrice] = useState('')
+  const [offerQuantity, setOfferQuantity] = useState('')
+  const [offerNote, setOfferNote] = useState('')
+  const [offerBusy, setOfferBusy] = useState(false)
+  const [offerMessage, setOfferMessage] = useState('')
 
   useEffect(() => {
     if (isDemoMode) return undefined
-
     let active = true
-    fetchActiveListings().then(({ data, error }) => {
+    Promise.all([fetchActiveListings(), fetchActiveRequirements()]).then(([listingResult, demandResult]) => {
       if (!active) return
-      if (error) {
-        setLoadError(error.message)
-        setItems([])
-      } else {
-        setItems((data || []).map((entry) => ({
-          id: entry.id,
-          name: entry.produce_name,
-          variety: entry.variety || 'Local variety',
-          seller: entry.profiles?.display_name || 'Verified farmer',
-          place: [entry.village, entry.district, entry.state].filter(Boolean).join(', ') || 'Northeast India',
-          price: Number(entry.asking_price_per_unit ?? entry.min_price_per_unit ?? 0),
-          minPrice: Number(entry.min_price_per_unit),
-          unit: entry.unit || 'kg',
-          quantity: `${entry.quantity} ${entry.unit || 'kg'}`,
-          freshness: 90,
-          tag: 'Live listing',
-          image: getListingImageUrl(entry.image_paths?.[0]),
-          verified: true,
-          status: entry.status,
-        })))
-      }
+      if (listingResult.error || demandResult.error) setLoadError(listingResult.error?.message || demandResult.error?.message || 'Unable to load marketplace.')
+      setItems((listingResult.data || []).map(entry => ({
+        kind: 'listing', id: entry.id, ownerId: entry.owner_id, name: entry.produce_name, variety: entry.variety || 'Local variety',
+        seller: entry.profiles?.display_name || 'FairHarvest farmer', place: [entry.village, entry.district, entry.state].filter(Boolean).join(', ') || 'Northeast India',
+        price: Number(entry.asking_price_per_unit ?? entry.min_price_per_unit ?? 0), minPrice: Number(entry.min_price_per_unit), unit: entry.unit || 'kg',
+        quantity: Number(entry.quantity), availability: entry.available_from, harvestDate: entry.harvest_date, image: getListingImageUrl(entry.image_paths?.[0]), status: entry.status || 'active'
+      })))
+      setDemands((demandResult.data || []).map(entry => ({
+        kind: 'demand', id: entry.id, ownerId: entry.owner_id, name: entry.produce_name, variety: entry.variety || 'Any quality grade',
+        buyer: entry.profiles?.display_name || 'FairHarvest buyer', place: entry.destination || 'Destination not provided',
+        price: Number(entry.budget_per_unit || 0), unit: entry.unit || 'kg', quantity: Number(entry.quantity), requiredBy: entry.required_by,
+        quality: entry.quality_requirements, delivery: entry.delivery_preference, status: entry.status || 'active'
+      })))
       setLoading(false)
-    })
-
-    return () => {
-      active = false
-    }
+    }).catch(error => { if (active) { setLoadError(error.message || 'Unable to load marketplace.'); setLoading(false) } })
+    return () => { active = false }
   }, [])
 
-  const filtered = items.filter((item) => {
-    const haystack = `${item.name} ${item.variety} ${item.place}`.toLowerCase()
-    const matchesQuery = haystack.includes(query.toLowerCase())
-    const matchesType = type === 'all' || (type === 'verified' ? item.verified : !item.verified)
-    return matchesQuery && matchesType
-  })
+  async function submitDemandOffer(event) {
+    event.preventDefault()
+    const quantity = Number(offerQuantity)
+    const price = Number(offerPrice)
+    if (!user || !demandOffer || quantity <= 0 || price < 0) { setOfferMessage('Enter a quantity and a valid non-negative price.'); return }
+    setOfferBusy(true); setOfferMessage('')
+    const { data: conversation, error: conversationError } = await getOrCreateRequirementConversation({ requirementId: demandOffer.id, farmerId: user.id, buyerId: demandOffer.ownerId })
+    if (conversationError) { setOfferBusy(false); setOfferMessage(conversationError.message || 'Unable to open the conversation.'); return }
+    const { error } = await createRequirementOffer({ conversationId: conversation.id, requirementId: demandOffer.id, farmerId: user.id, buyerId: demandOffer.ownerId, quantity, pricePerUnit: price, unit: demandOffer.unit, note: offerNote })
+    setOfferBusy(false)
+    if (error) { setOfferMessage(error.message || 'Unable to submit the offer.'); return }
+    setOfferMessage('Offer submitted. The buyer can review it in Messages.')
+  }
+
+  const listings = activeMode === 'farmer' ? demands : items
+  const visible = listings.filter(item => `${item.name} ${item.variety || ''} ${item.place}`.toLowerCase().includes(query.toLowerCase()) && (filter === 'all' || item.status === filter))
 
   return (
-    <main className="page">
+    <main className="page marketplace-page">
       <div className="container">
-        <div className="page-heading">
-          <div>
-            <div className="eyebrow">Direct from the Northeast</div>
-            <h1>Marketplace</h1>
-            <p>Find fresh produce and match it with the right buyers at the right time.</p>
-          </div>
-          <Link to="/assistant/sell" className="btn btn-primary">AI Selling Advisor <Bot size={16} /></Link>
-          <div className="market-toolbar">
-            <div className="search-shell">
-              <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search produce, variety, or district" />
-            </div>
-            <div className="filter-shell">
-              <Filter size={15} />
-              <select value={type} onChange={(event) => setType(event.target.value)}>
-                <option value="all">All listings</option>
-                <option value="verified">Verified only</option>
-                <option value="new">Unverified</option>
-              </select>
-            </div>
-          </div>
+        <div className="page-heading marketplace-heading">
+          <div><div className="eyebrow">Direct from the Northeast</div><h1>Marketplace</h1><p>{activeMode === 'farmer' ? 'Review buyer demand and offer the produce buyers need.' : 'Browse verified farmer harvests and contact sellers directly.'}</p><span className="market-mode-context">Viewing as {activeMode === 'farmer' ? 'Farmer' : 'Buyer'}</span></div>
+          <Link to="/fasalsaathi" className="btn btn-primary">Open FasalSaathi <Bot size={16} /></Link>
         </div>
-
-        {loading && <div className="empty-state">Loading marketplace…</div>}
-        {loadError && <div className="error-state">{loadError}</div>}
-
-        <div className="listing-grid">
-          {filtered.map((item) => (
-            <article key={item.id} className="listing-card">
-              <div className="listing-image">
-                <ListingImage src={item.image} alt={`${item.name} listing`} />
-                <span className="listing-tag"><Clock3 size={13} /> {item.tag}</span>
-                {item.verified && <span className="listing-verified">Verified</span>}
-              </div>
+        <div className="market-toolbar marketplace-toolbar"><div className="search-shell"><Search size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search crop, variety, or location" /></div><div className="filter-shell"><Filter size={15} /><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">All statuses</option><option value="active">Available / active</option><option value="negotiating">Negotiating</option><option value="closed">Closed</option></select></div></div>
+        {loading && <div className="empty-state">Loading marketplace�</div>}{loadError && <div className="error-state">{loadError}</div>}
+        {!loading && visible.length === 0 && <div className="empty-state"><Package size={28} /><h3>No matching {activeMode === 'farmer' ? 'buyer demand' : 'farmer listings'}</h3><p>Try another search or check back for new activity.</p></div>}
+        <div className="listing-grid marketplace-card-grid">
+          {visible.map(item => {
+            const owned = Boolean(user && item.ownerId === user.id)
+            const isDemand = item.kind === 'demand'
+            return <article className={`listing-card market-listing-card ${isDemand ? 'demand-card' : ''}`} key={`${item.kind}-${item.id}`}>
+              {!isDemand && <div className="listing-image"><ListingImage src={item.image} alt={`${item.name} listing`} /><span className="listing-tag">Farmer offer</span></div>}
               <div className="listing-body">
-                <div className="listing-header">
-                  <div>
-                    <h3>{item.name}</h3>
-                    <p>{item.variety}</p>
-                  </div>
-                  <div className="listing-price-block"><span className="price-badge">₹{item.price}</span><small>per {item.unit}</small></div>
-                </div>
-                <div className="listing-meta">
-                  <span><Package size={14} /> {item.quantity}</span>
-                  <span><MapPin size={14} /> {item.place}</span>
-                  <span className="listing-status">{item.status}</span>
-                </div>
-                {item.minPrice !== item.price && <div className="listing-min-price">Minimum accepted: ₹{item.minPrice} / {item.unit}</div>}
-                <Freshness score={item.freshness} />
-                <div className="listing-footer">
-                  <span className="seller-name">{item.seller}</span>
-                  <Link to={`/marketplace/${item.id}`} className="text-link">View details <ArrowRight size={15} /></Link>
-                </div>
+                <div className="market-card-kicker"><span>{isDemand ? 'Buyer demand' : 'Farmer offer'}</span><span className={`listing-status status-${item.status}`}>{item.status}</span></div>
+                <div className="listing-header"><div><h3>{item.name}</h3><p>{item.variety}</p></div><div className="listing-price-block"><strong>?{item.price || '�'}</strong><small>per {item.unit}</small></div></div>
+                <div className="listing-meta"><span><Package size={14} /> {item.quantity} {item.unit}</span><span><MapPin size={14} /> {item.place}</span>{isDemand ? item.requiredBy && <span><Clock3 size={14} /> Need by {item.requiredBy}</span> : item.harvestDate && <span><Clock3 size={14} /> Harvested {item.harvestDate}</span>}</div>
+                {!isDemand && item.minPrice !== item.price && item.minPrice > 0 && <div className="listing-min-price">Minimum: ?{item.minPrice} / {item.unit}</div>}
+                {isDemand && item.quality && <p className="market-card-detail">Quality: {item.quality}</p>}
+                <div className="listing-footer"><span className="seller-name">{isDemand ? item.buyer : item.seller}</span>{!owned && user && isDemand && activeMode === 'farmer' ? <button type="button" className="btn btn-primary btn-small" onClick={() => { setDemandOffer(item); setOfferQuantity(String(item.quantity)); setOfferPrice(String(item.price || '')); setOfferNote(''); setOfferMessage('') }}>Make an Offer</button> : !owned && user && !isDemand && activeMode === 'buyer' ? <Link className="btn btn-primary btn-small" to={`/marketplace/${item.id}`}>Make an Offer</Link> : owned ? <Link className="text-link" to="/dashboard/farmer">Manage listing</Link> : <Link className="text-link" to="/auth">Sign in to respond</Link>}</div>
               </div>
             </article>
-          ))}
+          })}
         </div>
+        {demandOffer && <div className="offer-modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDemandOffer(null) }}><div className="offer-modal" role="dialog" aria-modal="true" aria-labelledby="demand-offer-title"><button type="button" className="modal-close" onClick={() => setDemandOffer(null)} aria-label="Close offer form"><X size={18} /></button><span className="eyebrow">Buyer demand</span><h2 id="demand-offer-title">Offer on {demandOffer.name}</h2><p>Buyer budget: ?{demandOffer.price} per {demandOffer.unit}</p><form onSubmit={submitDemandOffer}><label>Price per {demandOffer.unit}<input type="number" min="0" step="0.01" required value={offerPrice} onChange={event => setOfferPrice(event.target.value)} /></label><label>Quantity ({demandOffer.unit})<input type="number" min="0.001" step="0.001" required value={offerQuantity} onChange={event => setOfferQuantity(event.target.value)} /></label><label>Message <span>(optional)</span><textarea value={offerNote} onChange={event => setOfferNote(event.target.value)} /></label>{offerMessage && <p className={offerMessage.includes('submitted') ? 'success-state' : 'error-state'}>{offerMessage}</p>}<button type="submit" className="btn btn-primary full" disabled={offerBusy}>{offerBusy ? 'Submitting�' : 'Submit Offer'}</button></form></div></div>}
       </div>
     </main>
   )
 }
-
 function ListingDetail() {
   const { id } = useParams()
   const demoItem = demoListings.find((entry) => String(entry.id) === String(id)) ?? demoListings[0]
@@ -413,7 +418,7 @@ function ListingDetail() {
   const isBuyer = !!(user && item && item.ownerId !== user.id)
   const isSeller = !!(user && item && item.ownerId === user.id)
 
-  // ── Messaging ───────────────────────────────────────────────────────────
+  // â”€â”€ Messaging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [conversation, setConversation] = useState(null)
   const [convError, setConvError] = useState('')
   const [messages, setMessages] = useState(isDemoMode
@@ -429,7 +434,7 @@ function ListingDetail() {
   const [sendError, setSendError] = useState('')
   const messagesEndRef = useRef(null)
 
-  // ── Offers ──────────────────────────────────────────────────────────────
+  // â”€â”€ Offers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [offers, setOffers] = useState(isDemoMode
     ? [{ id: 'demo-offer-1', quantity: 50, unit: demoItem.unit, price_per_unit: demoItem.price, status: 'pending' }]
     : [])
@@ -441,12 +446,12 @@ function ListingDetail() {
   const [offerBusy, setOfferBusy] = useState(false)
   const [offerMsg, setOfferMsg] = useState('')
 
-  // ── Derived loading states (no setState in effects) ──────────────────────
+  // â”€â”€ Derived loading states (no setState in effects) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const convLoading = Boolean(!isDemoMode && isBuyer && !conversation && !convError)
   const messagesLoading = Boolean(!isDemoMode && conversation && loadedConvId !== conversation.id)
   const offersLoading = Boolean(!isDemoMode && item && user && loadedOffersListingId !== item.id)
 
-  // ── Load listing ────────────────────────────────────────────────────────
+  // â”€â”€ Load listing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (isDemoMode) return undefined
     let active = true
@@ -484,7 +489,7 @@ function ListingDetail() {
     return () => { active = false }
   }, [id])
 
-  // ── Open conversation once listing + user are known ──────────────────────
+  // â”€â”€ Open conversation once listing + user are known â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (isDemoMode || !item || !user || isSeller) return undefined
     let active = true
@@ -498,7 +503,7 @@ function ListingDetail() {
     return () => { active = false }
   }, [item, user, isSeller])
 
-  // ── Load messages when conversation is known ─────────────────────────────
+  // â”€â”€ Load messages when conversation is known â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (!conversation) return undefined
     let active = true
@@ -518,10 +523,10 @@ function ListingDetail() {
     return () => { active = false }
   }, [conversation])
 
-  // ── Scroll to bottom on new messages ────────────────────────────────────
+  // â”€â”€ Scroll to bottom on new messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // ── Load offers (both buyer and seller see them) ─────────────────────────
+  // â”€â”€ Load offers (both buyer and seller see them) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (isDemoMode || !item || !user) return undefined
     let active = true
@@ -541,7 +546,7 @@ function ListingDetail() {
     return () => { active = false }
   }, [item, user])
 
-  // ── Handlers ─────────────────────────────────────────────────────────────
+  // â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function handleSendMessage() {
     const text = draft.trim()
     if (!text) return
@@ -569,7 +574,7 @@ function ListingDetail() {
     const price = Number(offerPrice)
     if (!Number.isFinite(qty) || qty <= 0) { setOfferMsg('Enter a valid quantity greater than zero.'); return }
     if (!Number.isFinite(price) || price < 0) { setOfferMsg('Enter a valid price.'); return }
-    if (price < item.minPrice) { setOfferMsg(`Price cannot be below the seller minimum of ₹${item.minPrice}.`); return }
+    if (price < item.minPrice) { setOfferMsg(`Price cannot be below the seller minimum of â‚¹${item.minPrice}.`); return }
     if (!conversation) { setOfferMsg('Conversation not ready. Please wait and try again.'); return }
     setOfferBusy(true)
     setOfferMsg('')
@@ -606,7 +611,7 @@ function ListingDetail() {
   return (
     <main className="page">
       <div className="container detail-layout">
-        {loading && <div className="empty-state">Loading listing…</div>}
+        {loading && <div className="empty-state">Loading listingâ€¦</div>}
         {listingError && <div className="error-state">{listingError}</div>}
         {!loading && !listingError && !item && <div className="empty-state">This listing is not available.</div>}
         {item && <div className="listing-detail-card">
@@ -620,7 +625,7 @@ function ListingDetail() {
             </div>
             <p className="detail-copy">Direct from a verified producer in the Northeast. This listing showcases fresh, traceable produce with transparent handling and quality expectations.</p>
             <div className="detail-pricing">
-              <strong>₹{item.price}</strong>
+              <strong>â‚¹{item.price}</strong>
               <span>per {item.unit}</span>
             </div>
             <Freshness score={item.freshness} />
@@ -630,12 +635,12 @@ function ListingDetail() {
         {showConvPanel && (
           <div className="panel message-panel">
             <div className="panel-heading">
-              <div><h2>Listing conversation</h2><p>{isDemoMode ? 'Demo conversation — messages are not saved.' : 'Messages are stored in Supabase and visible only to participants.'}</p></div>
+              <div><h2>Listing conversation</h2><p>{isDemoMode ? 'Demo conversation â€” messages are not saved.' : 'Messages are stored in Supabase and visible only to participants.'}</p></div>
             </div>
             {!isDemoMode && !user && <p className="empty-state">Sign in to join this conversation.</p>}
-            {!isDemoMode && user && convLoading && <p className="empty-state msg-loading">Opening conversation…</p>}
+            {!isDemoMode && user && convLoading && <p className="empty-state msg-loading">Opening conversationâ€¦</p>}
             {!isDemoMode && user && convError && <p className="error-state">{convError}</p>}
-            {(!isDemoMode && user && !convLoading && !convError && messagesLoading) && <p className="empty-state msg-loading">Loading messages…</p>}
+            {(!isDemoMode && user && !convLoading && !convError && messagesLoading) && <p className="empty-state msg-loading">Loading messagesâ€¦</p>}
             {messagesError && <p className="error-state">{messagesError}</p>}
             <div className="message-list">
               {messages.length === 0 && !messagesLoading && (
@@ -660,11 +665,11 @@ function ListingDetail() {
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={handleMessageKey}
-                  placeholder="Write a message…"
+                  placeholder="Write a messageâ€¦"
                   disabled={sending}
                 />
                 <button type="button" className="btn btn-primary" onClick={handleSendMessage} disabled={sending}>
-                  {sending ? 'Sending…' : 'Send'}
+                  {sending ? 'Sendingâ€¦' : 'Send'}
                 </button>
               </div>
             )}
@@ -684,23 +689,23 @@ function ListingDetail() {
                   <input type="number" min="0.001" step="0.001" value={isDemoMode ? 50 : offerQty}
                     onChange={(e) => setOfferQty(e.target.value)} placeholder="Quantity" required disabled={isDemoMode} />
                 </label>
-                <label className="offer-label">Price per {item.unit} (₹)
+                <label className="offer-label">Price per {item.unit} (â‚¹)
                   <input type="number" min="0" step="0.01" value={isDemoMode ? item.price : offerPrice}
-                    onChange={(e) => setOfferPrice(e.target.value)} placeholder={`Min ₹${item.minPrice}`} required disabled={isDemoMode} />
+                    onChange={(e) => setOfferPrice(e.target.value)} placeholder={`Min â‚¹${item.minPrice}`} required disabled={isDemoMode} />
                 </label>
                 <label className="offer-label offer-note">Note (optional)
                   <input type="text" value={isDemoMode ? 'Interested in a direct purchase' : offerNote}
                     onChange={(e) => setOfferNote(e.target.value)} placeholder="Optional note" disabled={isDemoMode} />
                 </label>
                 <button type="submit" className="btn btn-primary" disabled={offerBusy}>
-                  {offerBusy ? 'Submitting…' : 'Send offer'}
+                  {offerBusy ? 'Submittingâ€¦' : 'Send offer'}
                 </button>
               </form>
             )}
             {!isDemoMode && !isBuyer && !isSeller && item && user && (
               <p className="empty-state" style={{padding:'1rem 0'}}>Sign in as a buyer to make an offer.</p>
             )}
-            {offersLoading && <p className="empty-state" style={{padding:'.75rem 0'}}>Loading offers…</p>}
+            {offersLoading && <p className="empty-state" style={{padding:'.75rem 0'}}>Loading offersâ€¦</p>}
             {offersError && <p className="error-state">{offersError}</p>}
             {(offers.length > 0 || isDemoMode) && (
               <div className="offer-list">
@@ -708,7 +713,7 @@ function ListingDetail() {
                   <div key={offer.id} className="offer-item">
                     <div className="offer-item-main">
                       <strong>{offer.quantity} {offer.unit || item.unit}</strong>
-                      <span>₹{offer.price_per_unit} / {offer.unit || item.unit}</span>
+                      <span>â‚¹{offer.price_per_unit} / {offer.unit || item.unit}</span>
                       {offer.note && <small className="offer-note-text">{offer.note}</small>}
                     </div>
                     <div className="offer-actions">
@@ -884,10 +889,10 @@ function Dashboard({ role }) {
             <div className="advisor-entry panel">
               <div>
                 <div className="eyebrow"><Bot size={14} /> Farmer decision support</div>
-                <h2>AI Selling Advisor</h2>
-                <p>Compare selling today with waiting scenarios using your inputs and any verified market evidence available.</p>
+                <h2>FasalSaathi â€” Your Agricultural Companion</h2>
+                <p>Use one guided Sell/Buy agent with voice, photo, or manual details.</p>
               </div>
-              <Link to="/assistant/sell" className="btn btn-primary">Open advisor <ArrowRight size={16} /></Link>
+              <Link to="/fasalsaathi" className="btn btn-primary">Open FasalSaathi <ArrowRight size={16} /></Link>
             </div>
           )}
           {farmer && (
@@ -900,7 +905,7 @@ function Dashboard({ role }) {
               </div>
               {demo && <p className="empty-state">Demo mode is active. Sign in with Supabase to view real farmer listings.</p>}
               {!demo && !user && <p className="empty-state">Sign in is required to load your farmer listings.</p>}
-              {!demo && user && listingsLoading && <p className="empty-state">Loading your listings…</p>}
+              {!demo && user && listingsLoading && <p className="empty-state">Loading your listingsâ€¦</p>}
               {!demo && user && listingsError && <p className="error-state">{listingsError}</p>}
               {!demo && user && !listingsLoading && !listingsError && listings.length === 0 && (
                 <p className="empty-state">You have not created any listings yet.</p>
@@ -920,7 +925,7 @@ function Dashboard({ role }) {
                             <span>{listing.variety || 'Variety not specified'}</span>
                           </div>
                           <div className="farmer-listing-price">
-                            <strong>₹{listing.asking_price_per_unit ?? listing.min_price_per_unit}</strong>
+                            <strong>â‚¹{listing.asking_price_per_unit ?? listing.min_price_per_unit}</strong>
                             <small>/{listing.unit}</small>
                           </div>
                         </div>
@@ -930,7 +935,7 @@ function Dashboard({ role }) {
                           {(listing.village || listing.district || listing.state) && <span><MapPin size={14} /> {[listing.village, listing.district, listing.state].filter(Boolean).join(', ')}</span>}
                         </div>
                         {listing.asking_price_per_unit != null && listing.asking_price_per_unit !== listing.min_price_per_unit && (
-                          <small className="farmer-listing-minimum">Minimum accepted: ₹{listing.min_price_per_unit} / {listing.unit}</small>
+                          <small className="farmer-listing-minimum">Minimum accepted: â‚¹{listing.min_price_per_unit} / {listing.unit}</small>
                         )}
                         <button type="button" className="btn btn-outline btn-small" onClick={() => setEditingListing(listing)}>Edit listing</button>
                       </div>
@@ -938,6 +943,16 @@ function Dashboard({ role }) {
                   ))}
                 </div>
               )}
+            </div>
+          )}
+          {!farmer && (
+            <div className="advisor-entry panel">
+              <div>
+                <div className="eyebrow"><Bot size={14} /> Buyer decision support</div>
+                <h2>FasalSaathi â€” Your Agricultural Companion</h2>
+                <p>Use the unified agent with voice, photo, or manual buying details.</p>
+              </div>
+              <Link to="/fasalsaathi" className="btn btn-primary">Open FasalSaathi <ArrowRight size={16} /></Link>
             </div>
           )}
           {!farmer && (
@@ -1179,7 +1194,7 @@ function DataForm({ farmer, editingListing, onListingCreated, onListingUpdated, 
           </div>
         )}
         <button type="submit" disabled={busy} className="btn btn-primary">
-          {busy ? 'Saving…' : editingListing ? 'Save changes' : farmer ? 'Publish listing' : 'Save requirement'} <ArrowRight size={15} />
+          {busy ? 'Savingâ€¦' : editingListing ? 'Save changes' : farmer ? 'Publish listing' : 'Save requirement'} <ArrowRight size={15} />
         </button>
         {editingListing && <button type="button" className="btn btn-outline" disabled={busy} onClick={onCancelEdit}>Cancel</button>}
       </form>
@@ -1193,181 +1208,239 @@ function Auth() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [email, setEmail] = useState('')
-  const [name, setName] = useState('')
+  const [fullName, setFullName] = useState('')
   const [password, setPassword] = useState('')
-  const [code, setCode] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [accountType, setAccountType] = useState(searchParams.get('role') === 'buyer' ? 'buyer' : 'both')
+  const [location, setLocation] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [authMethod, setAuthMethod] = useState('password')
-  const [signup, setSignup] = useState(false)
-  const [sent, setSent] = useState(false)
+  const [signup, setSignup] = useState(searchParams.get('join') === 'true' || searchParams.has('role'))
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [errors, setErrors] = useState({})
   const [message, setMessage] = useState('')
   const { demo } = useAuth()
-  const role = searchParams.get('role') === 'farmer' ? 'farmer' : 'buyer'
 
-  function destination() {
-    return `/dashboard/${role}`
-  }
+  function resetFeedback() { setErrors({}); setMessage('') }
+  function ensureSupabase() { if (demo || !supabase) { setErrors({ form: 'Authentication is unavailable until Supabase is configured.' }); return false } return true }
 
-  function resetFeedback() {
-    setError('')
-    setMessage('')
-  }
-
-  async function signInWithPassword(event) {
+  async function signIn(event) {
     event.preventDefault()
     resetFeedback()
-    if (demo || !supabase) {
-      setError('Authentication is unavailable in demo mode. Configure Supabase to continue.')
-      return
-    }
-
+    const nextErrors = validateLogin({ email, password })
+    if (Object.keys(nextErrors).length) { setErrors(nextErrors); return }
+    if (!ensureSupabase()) return
     setBusy(true)
-    const result = await supabase.auth.signInWithPassword({ email, password })
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
     setBusy(false)
-    if (result.error) {
-      setError(result.error.message)
-      return
-    }
-    if (!result.data.session) {
-      setError('Login did not create a session. Please try again.')
-      return
-    }
-    setMessage('Signed in successfully. Redirecting…')
-    navigate(destination())
+    if (error) { setErrors({ form: error.message }); return }
+    navigate('/', { replace: true })
   }
 
-  async function signUpWithPassword(event) {
+  async function signUp(event) {
     event.preventDefault()
     resetFeedback()
-    if (demo || !supabase) {
-      setError('Authentication is unavailable in demo mode. Configure Supabase to continue.')
-      return
-    }
-
+    const nextErrors = validateRegistration({ email, fullName, password, confirmPassword, accountType })
+    if (Object.keys(nextErrors).length) { setErrors(nextErrors); return }
+    if (!ensureSupabase()) return
     setBusy(true)
-    const result = await supabase.auth.signUp({
-      email,
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
       password,
-      options: {
-        data: {
-          display_name: name.trim(),
-          role,
-          preferred_workspace: role,
-        },
-      },
+      options: { data: { full_name: fullName.trim(), display_name: fullName.trim(), account_type: accountType, location: location.trim(), role: accountType === 'buyer' ? 'buyer' : 'farmer' } },
     })
     setBusy(false)
-    if (result.error) {
-      setError(result.error.message)
-      return
+    if (error) { setErrors({ form: error.message }); return }
+    if (data.session) {
+      navigate('/', { replace: true })
+    } else {
+      setMessage('Account registered. Check your email and verify your address before signing in.')
     }
-    if (result.data.session) {
-      setMessage('Account created. Redirecting…')
-      navigate(destination())
-      return
-    }
-    setMessage('Account created. Check your email to confirm your address before signing in.')
   }
 
-  async function sendCode(event) {
+  async function sendRecovery(event) {
     event.preventDefault()
-    setError('')
-    if (demo || !supabase) {
-      setError('Authentication is unavailable in demo mode. Configure Supabase to continue.')
-      return
-    }
+    resetFeedback()
+    const emailError = validateLogin({ email, password: 'present' }).email
+    if (emailError) { setErrors({ email: emailError }); return }
+    if (!ensureSupabase()) return
     setBusy(true)
-    const result = await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: `${window.location.origin}/auth?reset=true` })
     setBusy(false)
-    if (result.error) {
-      setError(result.error.message)
-      return
-    }
-    setSent(true)
-    setMessage('Check your email for the one-time code.')
+    setErrors(error ? { form: error.message } : {})
+    if (!error) setMessage('If an account exists for this email, a password reset link has been sent.')
   }
 
-  async function verifyCode(event) {
+  async function updatePassword(event) {
     event.preventDefault()
+    if (!ensureSupabase()) return
+    const nextErrors = password.length >= 8 ? {} : { password: 'Use at least 8 characters.' }
+    if (Object.keys(nextErrors).length) { setErrors(nextErrors); return }
     setBusy(true)
-    setError('')
-    if (demo || !supabase) {
-      setBusy(false)
-      setError('Authentication is unavailable in demo mode. Configure Supabase to continue.')
-      return
-    }
-    const result = await supabase.auth.verifyOtp({ email, token: code, type: 'email' })
+    const { error } = await supabase.auth.updateUser({ password })
     setBusy(false)
-    if (result.error) {
-      setError(result.error.message)
-      return
-    }
-    setMessage('Signed in. Redirecting…')
-    setTimeout(() => navigate(destination()), 600)
+    if (error) setErrors({ form: error.message })
+    else { setMessage('Password updated. You can now continue.'); navigate('/', { replace: true }) }
   }
 
+  const resetMode = searchParams.get('reset') === 'true'
   return (
     <main className="auth-page">
-      <div className="auth-card">
+      <div className="auth-card auth-card-wide">
         <Logo />
         <div className="auth-icon"><ShieldCheck size={25} /></div>
-        <h1>Welcome to FairHarvest</h1>
-        <p>{authMethod === 'otp' ? (sent ? 'Enter the one-time code from your email.' : 'Sign in with a one-time code sent to your email.') : signup ? 'Create your FairHarvest account with an email and password.' : 'Sign in with your email and password.'}</p>
+        <h1>{resetMode ? 'Set a new password' : signup ? 'Join FairHarvest' : 'Welcome back'}</h1>
+        <p>{resetMode ? 'Choose a strong new password for your account.' : signup ? 'Create an account for your harvest and market.' : 'Sign in to manage your harvest, requirements, and profile.'}</p>
 
-        {authMethod === 'otp' ? (
-          !sent ? (
-            <form onSubmit={sendCode}>
-              <label>
-                Email address
-                <input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
-              </label>
-              <button type="submit" disabled={busy} className="btn btn-primary full">
-                {busy ? 'Sending…' : 'Send me a code'} <ArrowRight size={16} />
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={verifyCode}>
-              <label>
-                Verification code
-                <input required inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" />
-              </label>
-              <button type="submit" disabled={busy} className="btn btn-primary full">
-                {busy ? 'Verifying…' : 'Verify and continue'} <ArrowRight size={16} />
-              </button>
-            </form>
-          )
+        {resetMode ? (
+          <form onSubmit={updatePassword}>
+            <PasswordField label="New password" value={password} onChange={setPassword} show={showPassword} onToggle={() => setShowPassword(value => !value)} />
+            <button className="btn btn-primary full" disabled={busy}>{busy ? 'Updating…' : 'Update password'} <ArrowRight size={16} /></button>
+          </form>
+        ) : authMethod === 'otp' ? (
+          <form onSubmit={sendRecovery}><EmailField value={email} onChange={setEmail} /><button className="btn btn-primary full" disabled={busy}>{busy ? 'Sending…' : 'Send reset link'} <ArrowRight size={16} /></button></form>
         ) : (
-          <form onSubmit={signup ? signUpWithPassword : signInWithPassword}>
+          <form onSubmit={signup ? signUp : signIn}>
             {signup && (
-              <label>
-                Name
-                <input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" />
-              </label>
+              <>
+                <label>Full name<input required autoComplete="name" value={fullName} onChange={event => { setFullName(event.target.value); setErrors(current => ({ ...current, fullName: undefined })) }} placeholder="Your full name" /></label>
+                {errors.fullName && <p className="field-error">{errors.fullName}</p>}
+                <fieldset className="account-type-field"><legend>Account type</legend><div>{[['farmer','Farmer'],['buyer','Buyer'],['both','Both']].map(([value,label]) => <label key={value}><input type="radio" name="accountType" checked={accountType === value} onChange={() => setAccountType(value)} /> {label}</label>)}</div></fieldset>
+                {errors.accountType && <p className="field-error">{errors.accountType}</p>}
+                <label>Location <span>(optional)</span><input value={location} onChange={event => setLocation(event.target.value)} autoComplete="address-level2" placeholder="District or city" /></label>
+              </>
             )}
-            <label>
-              Email address
-              <input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
-            </label>
-            <label>
-              Password
-              <input required type="password" minLength="6" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" />
-            </label>
-            <button type="submit" disabled={busy} className="btn btn-primary full">
-              {busy ? (signup ? 'Creating account…' : 'Signing in…') : (signup ? 'Create account' : 'Sign in')} <ArrowRight size={16} />
-            </button>
+            <EmailField value={email} onChange={setEmail} />
+            {errors.email && <p className="field-error">{errors.email}</p>}
+            <PasswordField value={password} onChange={setPassword} show={showPassword} onToggle={() => setShowPassword(value => !value)} />
+            {signup && <small className="password-hint">At least 8 characters, including a letter and number.</small>}
+            {errors.password && <p className="field-error">{errors.password}</p>}
+            {signup && <><PasswordField label="Confirm password" value={confirmPassword} onChange={setConfirmPassword} show={showPassword} onToggle={() => setShowPassword(value => !value)} />{errors.confirmPassword && <p className="field-error">{errors.confirmPassword}</p>}</>}
+            <button type="submit" disabled={busy} className="btn btn-primary full">{busy ? (signup ? 'Creating account…' : 'Signing in…') : (signup ? 'Create account' : 'Sign in')} <ArrowRight size={16} /></button>
           </form>
         )}
 
         {message && <p className="success-state">{message}</p>}
-        {error && <p className="error-state">{error}</p>}
-        <div className="auth-switches">
-          {authMethod === 'password' && <button type="button" className="text-link" onClick={() => { setSignup(!signup); resetFeedback() }}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button>}
-          <button type="button" className="text-link" onClick={() => { setAuthMethod(authMethod === 'otp' ? 'password' : 'otp'); setSent(false); resetFeedback() }}>
-            {authMethod === 'otp' ? 'Use email and password instead' : 'Use a one-time email code instead'}
-          </button>
+        {errors.form && <p className="error-state">{errors.form}</p>}
+        {!resetMode && <div className="auth-switches">
+          {authMethod === 'password' && <button type="button" className="text-link" onClick={() => { setSignup(value => !value); resetFeedback() }}>{signup ? 'Already have an account? Sign in' : 'Need an account? Join FairHarvest'}</button>}
+          {authMethod === 'password' && !signup && <button type="button" className="text-link" onClick={() => { setAuthMethod('otp'); resetFeedback() }}>Forgot password?</button>}
+          {authMethod === 'otp' && <button type="button" className="text-link" onClick={() => setAuthMethod('password')}>Back to sign in</button>}
+        </div>}
+        <small className="auth-note">Passwords are handled by Supabase Auth. Never share your password.</small>
+      </div>
+    </main>
+  )
+}
+
+function MessagesPage() {
+  const { user } = useAuth()
+  const [conversations, setConversations] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [activeId, setActiveId] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+  const [messageError, setMessageError] = useState('')
+
+  async function loadInbox() {
+    if (!user) return
+    setError('')
+    const { data, error: loadError } = await fetchConversations(user.id)
+    setLoading(false)
+    if (loadError) { setError(loadError.message || 'Unable to load conversations.'); return }
+    setConversations(data || [])
+  }
+
+  // Load once when the authenticated user changes; manual refresh also calls loadInbox.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadInbox() }, [user])
+
+  async function openConversation(conversation) {
+    setActiveId(conversation.id); setMessages([]); setMessageError('')
+    const { data, error: loadError } = await fetchConversationMessages(conversation.id)
+    if (loadError) { setMessageError(loadError.message || 'Unable to load messages.'); return }
+    setMessages(data || [])
+  }
+
+  async function sendMessage(event) {
+    if (event) event.preventDefault()
+    const body = draft.trim()
+    if (!activeId || !body || !user) return
+    setSending(true); setMessageError('')
+    const { data, error: sendError } = await sendConversationMessage({ conversationId: activeId, senderId: user.id, body })
+    setSending(false)
+    if (sendError) { setMessageError(sendError.message || 'Unable to send message.'); return }
+    setMessages(current => [...current, data]); setDraft('')
+    loadInbox()
+  }
+
+  const activeConversation = conversations.find(conversation => conversation.id === activeId)
+  return <main className="page messages-page"><div className="container"><div className="page-heading"><div><div className="eyebrow">Trade conversations</div><h1>Messages</h1><p>Your persistent offer and marketplace conversations.</p></div></div>{error && <div className="error-state">{error}</div>}<div className="messages-layout"><aside className="conversation-list"><div className="conversation-list-heading"><strong>Inbox</strong><button type="button" className="text-link" onClick={loadInbox}>Refresh</button></div>{loading && <div className="empty-state compact">Loading conversations�</div>}{!loading && conversations.length === 0 && <div className="empty-state compact"><h3>No conversations yet</h3><p>Make an offer or contact a listing owner to start one.</p></div>}{conversations.map(conversation => { const listing = conversation.listing || conversation.demand; return <button type="button" key={conversation.id} className={`conversation-row ${activeId === conversation.id ? 'active' : ''}`} onClick={() => openConversation(conversation)}><span className="conversation-avatar">{String(listing?.produce_name || 'FH').slice(0, 2).toUpperCase()}</span><span><strong>{listing?.produce_name || 'Marketplace conversation'}</strong><small>{conversation.latest_message?.body || 'No messages yet'}</small></span></button> })}</aside><section className="conversation-panel">{activeConversation ? <><div className="conversation-header"><div><span className="conversation-eyebrow">Conversation</span><strong>{activeConversation.listing?.produce_name || activeConversation.demand?.produce_name || 'Marketplace listing'}</strong></div></div><div className="message-history">{messages.map(message => <div key={message.id} className={`message-bubble ${message.sender_id === user?.id ? 'own' : 'other'}`}><p>{message.body}</p><time>{message.created_at ? new Date(message.created_at).toLocaleString() : 'Just now'}</time></div>)}</div>{messageError && <div className="error-state conversation-error">{messageError}</div>}<form className="message-composer" onSubmit={sendMessage}><textarea value={draft} rows="2" placeholder="Write a message�" onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) sendMessage(event) }} /><button type="submit" className="btn btn-primary" disabled={sending || !draft.trim()}>{sending ? 'Sending�' : 'Send'}</button></form></> : <div className="conversation-placeholder"><h2>Select a conversation</h2><p>Choose one from your inbox to view messages.</p></div>}</section></div></div></main>
+}
+function EmailField({ value, onChange }) {
+  return <label>Email address<input required type="email" autoComplete="email" value={value} onChange={event => onChange(event.target.value)} placeholder="you@example.com" /></label>
+}
+
+function PasswordField({ label = 'Password', value, onChange, show, onToggle }) {
+  return <label>{label}<span className="password-input"><input required type={show ? 'text' : 'password'} minLength={8} autoComplete={label === 'Password' ? 'current-password' : 'new-password'} value={value} onChange={event => onChange(event.target.value)} placeholder="At least 8 characters" /><button type="button" aria-label={show ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`} onClick={onToggle}>{show ? <EyeOff size={18} /> : <Eye size={18} />}</button></span></label>
+}
+
+function ProfilePage() {
+  const navigate = useNavigate()
+  const { user, profile, profileError, refreshProfile, activeMode, signOut } = useAuth()
+  const [fullName, setFullName] = useState(profile?.display_name || profile?.full_name || '')
+  const [location, setLocation] = useState(profile?.location || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  async function saveProfile(event) {
+    event.preventDefault()
+    setError(''); setMessage('')
+    const cleanName = fullName.trim()
+    if (cleanName.length < 2) { setError('Enter your full name.'); return }
+    setSaving(true)
+    const { error: saveError } = await supabase.from('profiles').update({ display_name: cleanName, full_name: cleanName, location: location.trim() }).eq('id', user.id).select('id').single()
+    if (saveError) { setSaving(false); setError(saveError.message); return }
+    await refreshProfile()
+    setSaving(false)
+    setMessage('Profile saved to your account.')
+  }
+
+  async function handleSignOut() {
+    await signOut()
+    navigate('/', { replace: true })
+  }
+
+  const displayName = profile?.full_name || profile?.display_name || user?.email || 'FairHarvest member'
+  const initials = displayName.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase()
+
+  return (
+    <main className="page profile-page">
+      <div className="container profile-container">
+        <section className="profile-hero">
+          <div className="profile-avatar-large">{initials}</div>
+          <div className="profile-identity"><span className="eyebrow">Your FairHarvest account</span><h1>{displayName}</h1><p>{user?.email}</p></div>
+          <span className={`profile-mode-badge ${activeMode}`}><Sprout size={15} /> Active {activeMode === 'farmer' ? 'Farmer' : 'Buyer'} mode</span>
+        </section>
+        <div className="profile-layout">
+          <form className="profile-card profile-edit-card" onSubmit={saveProfile}>
+            <div className="profile-card-heading"><div><span className="profile-card-icon"><UserCircle size={20} /></span><div><h2>Personal information</h2><p>Details used across your FairHarvest workspace.</p></div></div></div>
+            <div className="profile-fields">
+              <label>Full name<input value={fullName} onChange={event => setFullName(event.target.value)} autoComplete="name" /></label>
+              <label>Location <span>(optional)</span><input value={location} onChange={event => setLocation(event.target.value)} autoComplete="address-level2" placeholder="District or village" /></label>
+            </div>
+            {profileError && <p className="error-state">{profileError}</p>}{error && <p className="error-state">{error}</p>}{message && <p className="success-state">{message}</p>}
+            <div className="profile-actions"><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save profile'} <ArrowRight size={16} /></button></div>
+          </form>
+          <aside className="profile-card profile-account-card">
+            <div className="profile-card-heading"><div><span className="profile-card-icon"><ShieldCheck size={20} /></span><div><h2>Account</h2><p>Identity and workspace details.</p></div></div></div>
+            <dl><div><dt>Email</dt><dd>{user?.email || 'Not available'}</dd></div><div><dt>Account type</dt><dd>{profile?.account_type || 'both'}</dd></div><div><dt>Workspace</dt><dd>{activeMode === 'farmer' ? 'Farmer' : 'Buyer'}</dd></div></dl>
+            <div className="profile-security"><strong>Account security</strong><p>Your password and sign-in sessions are managed securely by Supabase.</p><button type="button" className="btn btn-outline profile-signout" onClick={handleSignOut}><LogOut size={16} /> Sign out</button></div>
+          </aside>
         </div>
-        <small className="auth-note">Never share your password. By continuing, you agree to our Terms and Privacy Policy.</small>
       </div>
     </main>
   )
@@ -1391,7 +1464,7 @@ function AssistantResult({ result, selling, onRevise }) {
       {selling && <div className="evidence-panel panel">
         <h3>Market evidence</h3>
         {result.marketEvidence?.available && result.marketEvidence.observations?.length
-          ? <div className="evidence-list">{result.marketEvidence.observations.map((observation, index) => <div key={`${observation.market}-${observation.observationDate}-${index}`}><strong>{observation.market || 'Market not provided'}</strong><span>{observation.commodity || 'Commodity not provided'} · {observation.observationDate || 'Date unavailable'} · modal {observation.modalPrice ?? 'n/a'} {observation.priceUnit}</span></div>)}</div>
+          ? <div className="evidence-list">{result.marketEvidence.observations.map((observation, index) => <div key={`${observation.market}-${observation.observationDate}-${index}`}><strong>{observation.market || 'Market not provided'}</strong><span>{observation.commodity || 'Commodity not provided'} Â· {observation.observationDate || 'Date unavailable'} Â· modal {observation.modalPrice ?? 'n/a'} {observation.priceUnit}</span></div>)}</div>
           : <p>{result.marketEvidence?.message || 'Market data unavailable. This analysis uses farmer-provided inputs only.'}</p>}
       </div>}
       <div className="scenario-grid">
@@ -1399,12 +1472,12 @@ function AssistantResult({ result, selling, onRevise }) {
           <div key={scenario.id || scenario.label || index} className={`scenario-card ${index === 0 ? 'recommended' : ''}`}>
             <h3>{scenario.label || 'Option'}</h3>
             <p className="scenario-assumption">{scenario.priceAssumption || scenario.quotedBy || 'User-provided assumption'}</p>
-            <ul><li>Gross value: {scenario.grossRevenue == null && scenario.produceCost == null ? 'Unavailable' : `₹${scenario.grossRevenue ?? scenario.produceCost} (${scenario.quantity ?? ''} ${scenario.unit || ''} at ₹${scenario.assumedPricePerUnit ?? scenario.pricePerUnit ?? ''}/${scenario.priceUnit || scenario.unit || 'unit'})`}</li><li>Costs: {scenario.costStatus || (scenario.knownCosts == null && scenario.netProceeds == null ? 'Unavailable' : `₹${scenario.knownCosts ?? scenario.deliveredCost}`)}</li><li>Net: {scenario.netProceeds == null && scenario.costPerUnit == null ? 'Unavailable — required costs are missing' : `₹${scenario.netProceeds ?? scenario.costPerUnit}`}</li></ul>
+            <ul><li>Gross value: {scenario.grossRevenue == null && scenario.produceCost == null ? 'Unavailable' : `â‚¹${scenario.grossRevenue ?? scenario.produceCost} (${scenario.quantity ?? ''} ${scenario.unit || ''} at â‚¹${scenario.assumedPricePerUnit ?? scenario.pricePerUnit ?? ''}/${scenario.priceUnit || scenario.unit || 'unit'})`}</li><li>Costs: {scenario.costStatus || (scenario.knownCosts == null && scenario.netProceeds == null ? 'Unavailable' : `â‚¹${scenario.knownCosts ?? scenario.deliveredCost}`)}</li><li>Net: {scenario.netProceeds == null && scenario.costPerUnit == null ? 'Unavailable â€” required costs are missing' : `â‚¹${scenario.netProceeds ?? scenario.costPerUnit}`}</li></ul>
             <p>{scenario.freshnessConcern || scenario.risks?.[0] || 'No major risks flagged.'}</p>
           </div>
         ))}
       </div>
-      {selling && result.transport && <div className="panel evidence-panel"><h3>Transport cost</h3><p>{result.transport.status === 'unavailable' ? 'Unavailable — no verified quote or configured rate was provided. Net proceeds may be incomplete.' : `${result.transport.status === 'estimated' ? 'Estimated' : 'Farmer-provided'}: ₹${result.transport.amount} ${result.transport.currency} (${result.transport.basis}).`}</p></div>}
+      {selling && result.transport && <div className="panel evidence-panel"><h3>Transport cost</h3><p>{result.transport.status === 'unavailable' ? 'Unavailable â€” no verified quote or configured rate was provided. Net proceeds may be incomplete.' : `${result.transport.status === 'estimated' ? 'Estimated' : 'Farmer-provided'}: â‚¹${result.transport.amount} ${result.transport.currency} (${result.transport.basis}).`}</p></div>}
       <div className="panel risk-panel"><h3>Risks and uncertainty</h3><p>{result.explanation?.uncertainty || 'Evidence is limited. No future price or shelf-life guarantee is provided.'}</p><ul>{(result.explanation?.followUpQuestions || ['What additional evidence could change this decision?']).map(question => <li key={question}>{question}</li>)}</ul></div>
       <button type="button" className="btn btn-outline" onClick={onRevise}>Revise details</button>
     </div>
@@ -1434,8 +1507,7 @@ function Assistant({ mode }) {
     setBusy(true)
     try {
       const response = await fetch('/api/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, input }) })
-      const payload = await response.json()
-      if (!response.ok) throw new Error(payload.error || 'Assistant request failed.')
+      const payload = await readAssistantResponse(response)
       setResult(payload)
     } catch (requestError) {
       setError(requestError.message || 'Unable to analyze these details. Your entries were kept.')
@@ -1444,7 +1516,7 @@ function Assistant({ mode }) {
   const field = (key, label, options = {}) => <label className="assistant-field">{label}{options.help && <small>{options.help}</small>}<input type={options.type || 'text'} value={input[key]} min={options.min} step={options.step} onChange={event => update(key, event.target.value)} placeholder={options.placeholder} /></label>
   return (
     <main className="page assistant-page"><div className="container">
-      <Link to={`/dashboard/${selling ? 'farmer' : 'buyer'}`} className="text-link">← Back to dashboard</Link>
+      <Link to={`/dashboard/${selling ? 'farmer' : 'buyer'}`} className="text-link">â† Back to dashboard</Link>
       <div className="assistant-heading"><div><div className="eyebrow"><Bot size={14} /> {selling ? 'Farmer workspace' : 'Buyer workspace'}</div><h1>{selling ? 'AI Selling Advisor' : 'Purchase Assistant'}</h1><p>{selling ? 'Use your actual harvest details and clearly labelled evidence to compare selling today with waiting.' : 'Compare buying options using your actual quotes.'}</p></div><span className="assistant-mode-pill">{isDemoMode ? 'Demo mode: no live AI' : 'Live endpoint when configured'}</span></div>
       <div className="assistant-layout">
         {!result && <form className="panel assistant-form" onSubmit={submit}>
@@ -1456,7 +1528,7 @@ function Assistant({ mode }) {
             {!selling && <div className="assistant-form-group"><h3>Purchase details</h3><div className="form-grid">{field('destination','Destination',{placeholder:'Required for buyers'})}{field('requiredBy','Required by',{type:'date'})}{field('qualityRequirements','Quality requirements',{placeholder:'Optional'})}</div></div>}
           </div> : <div className="review-summary">{Object.entries(input).filter(([, value]) => value !== '' && !Array.isArray(value)).map(([key, value]) => <div key={key}><span>{key.replace(/[A-Z]/g, letter => ` ${letter}`).replace(/^./, letter => letter.toUpperCase())}</span><strong>{String(value)}</strong></div>)}</div>}
           {error && <p className="error-state">{error}</p>}
-          <button type="submit" disabled={busy} className="btn btn-primary full">{busy ? 'Analyzing…' : reviewing ? 'Request analysis' : 'Review details'} <ArrowRight size={16} /></button>
+          <button type="submit" disabled={busy} className="btn btn-primary full">{busy ? 'Analyzingâ€¦' : reviewing ? 'Request analysis' : 'Review details'} <ArrowRight size={16} /></button>
           {reviewing && <button type="button" className="btn btn-outline full" onClick={() => setReviewing(false)}>Edit details</button>}
         </form>}
         {result ? <AssistantResult result={result} selling={selling} onRevise={() => { setResult(null); setReviewing(false) }} /> : <div className="panel assistant-empty"><Bot size={36} /><h2>{reviewing ? 'Ready to analyze' : 'Your evidence-grounded comparison will appear here'}</h2><p>Future prices are not forecast without a validated model. Market data is shown only when the official adapter is configured and returns verified observations.</p></div>}
@@ -1489,22 +1561,26 @@ function Settings() {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/auth" element={<Auth />} />
+    <LandingIntro>
+      <Routes>
+        <Route path="/auth" element={<Auth />} />
+        <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
       <Route path="*" element={
         <Layout>
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/marketplace" element={<Marketplace />} />
-            <Route path="/marketplace/:id" element={<ListingDetail />} />
-            <Route path="/assistant/sell" element={<ProtectedRoute><Assistant mode="sell" /></ProtectedRoute>} />
-            <Route path="/assistant/buy" element={<ProtectedRoute><Assistant mode="buy" /></ProtectedRoute>} />
-            <Route path="/dashboard/farmer" element={<ProtectedRoute><Dashboard role="farmer" /></ProtectedRoute>} />
-            <Route path="/dashboard/buyer" element={<ProtectedRoute><Dashboard role="buyer" /></ProtectedRoute>} />
+            <Route path="/marketplace/:id" element={<ListingDetail />} /><Route path="/messages" element={<ProtectedRoute><MessagesPage /></ProtectedRoute>} />
+            <Route path="/fasalsaathi" element={<ProtectedRoute><FasalSaathi /></ProtectedRoute>} />
+            <Route path="/assistant/sell" element={<ProtectedRoute><ModeRoute role="farmer"><Assistant mode="sell" /></ModeRoute></ProtectedRoute>} />
+            <Route path="/assistant/buy" element={<ProtectedRoute><ModeRoute role="buyer"><Assistant mode="buy" /></ModeRoute></ProtectedRoute>} />
+            <Route path="/dashboard/farmer" element={<ProtectedRoute><ModeRoute role="farmer"><Dashboard role="farmer" /></ModeRoute></ProtectedRoute>} />
+            <Route path="/dashboard/buyer" element={<ProtectedRoute><ModeRoute role="buyer"><Dashboard role="buyer" /></ModeRoute></ProtectedRoute>} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </Layout>
-      } />
-    </Routes>
+        } />
+      </Routes>
+    </LandingIntro>
   )
 }
